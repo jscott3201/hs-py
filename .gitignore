@@ -1,0 +1,49 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Docs
+docs/_build/
+
+# Context & planning
+_ctx/
+_plan/
+_data/
+
+# Docker local certs
+docker/.certs/

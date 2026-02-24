@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.claude/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+docs/_build/
+_plan/
+_ctx/
+*.egg-info/
+docker/tls/

@@ -1,0 +1,68 @@
+services:
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../_data:/app/_data:ro
+    environment:
+      REDIS_URL: redis://redis:6379
+      HAYSTACK_USER: admin
+      HAYSTACK_PASS: secret
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8080),2); s.close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: haystack
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-tls:
+    image: redis:8-alpine
+    ports:
+      - "6380:6380"
+    volumes:
+      - ./tls:/tls:ro
+    command: >
+      redis-server
+      --port 0
+      --tls-port 6380
+      --tls-cert-file /tls/server.pem
+      --tls-key-file /tls/server.key
+      --tls-ca-cert-file /tls/ca.pem
+      --tls-auth-clients yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--cert", "/tls/client.pem",
+             "--key", "/tls/client.key", "--cacert", "/tls/ca.pem",
+             "-p", "6380", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

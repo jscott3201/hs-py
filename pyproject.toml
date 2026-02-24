@@ -1,0 +1,63 @@
+[project]
+name = "hs-py"
+version = "0.1.0"
+description = "Async Project Haystack client and ontology library for Python"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["aiohttp>=3.10", "orjson>=3.10", "cryptography>=42.0", "websockets>=14.0"]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "redis[hiredis]>=5.2"]
+timescale = ["asyncpg>=0.30"]
+rdf = ["rdflib>=7.0"]
+all = ["hs-py[server]", "hs-py[timescale]", "hs-py[rdf]"]
+
+[dependency-groups]
+test = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-cov>=6.0", "coverage>=7.0", "httpx>=0.28"]
+lint = ["ruff>=0.8"]
+type-check = ["mypy>=1.13", "types-redis>=4.6"]
+docs = [
+    "sphinx>=8.0",
+    "furo>=2024.8",
+    "sphinx-autodoc-typehints>=2.0",
+    "myst-parser>=4.0",
+]
+dev = [
+    { include-group = "test" },
+    { include-group = "lint" },
+    { include-group = "type-check" },
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hs_py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+packages = ["hs_py"]
+
+[tool.coverage.run]
+source = ["src/hs_py"]
+branch = true
+omit = [
+    "src/hs_py/__main__.py",
+    "src/hs_py/redis_ops.py",
+    "src/hs_py/storage/redis.py",
+    "src/hs_py/storage/timescale.py",
+    "src/hs_py/ontology/rdf.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "if __name__"]
