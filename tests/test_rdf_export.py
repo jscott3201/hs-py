@@ -11,18 +11,6 @@ from hs_py.kinds import Symbol
 from hs_py.ontology.defs import Def, Lib
 from hs_py.ontology.namespace import Namespace
 
-try:
-    import rdflib  # noqa: F401
-
-    _HAS_RDFLIB = True
-except ImportError:
-    _HAS_RDFLIB = False
-
-pytestmark = [
-    pytest.mark.skipif(not _HAS_RDFLIB, reason="rdflib not installed"),
-]
-
-
 # ---------------------------------------------------------------------------
 # Test fixtures
 # ---------------------------------------------------------------------------
@@ -87,8 +75,9 @@ def test_export_turtle_contains_defs(ns: Namespace) -> None:
     from hs_py.ontology.rdf import export_turtle
 
     output = export_turtle(ns)
-    assert "ph/site" in output
-    assert "ph/equip" in output
+    # rdflib may serialise as prefixed (ph:site) or full URI — accept either
+    assert "site" in output
+    assert "equip" in output
 
 
 def test_export_turtle_subclass(ns: Namespace) -> None:

@@ -621,6 +621,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "cryptography" },
     { name = "orjson" },
+    { name = "rdflib" },
     { name = "websockets" },
 ]
 
@@ -628,12 +629,8 @@ dependencies = [
 all = [
     { name = "asyncpg" },
     { name = "fastapi" },
-    { name = "rdflib" },
     { name = "redis", extra = ["hiredis"] },
     { name = "uvicorn", extra = ["standard"] },
-]
-rdf = [
-    { name = "rdflib" },
 ]
 server = [
     { name = "fastapi" },
@@ -682,16 +679,15 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'timescale'", specifier = ">=0.30" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
-    { name = "hs-py", extras = ["rdf"], marker = "extra == 'all'" },
     { name = "hs-py", extras = ["server"], marker = "extra == 'all'" },
     { name = "hs-py", extras = ["timescale"], marker = "extra == 'all'" },
     { name = "orjson", specifier = ">=3.10" },
-    { name = "rdflib", marker = "extra == 'rdf'", specifier = ">=7.0" },
+    { name = "rdflib", specifier = ">=7.0" },
     { name = "redis", extras = ["hiredis"], marker = "extra == 'server'", specifier = ">=5.2" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.32" },
     { name = "websockets", specifier = ">=14.0" },
 ]
-provides-extras = ["server", "timescale", "rdf", "all"]
+provides-extras = ["server", "timescale", "all"]
 
 [package.metadata.requires-dev]
 dev = [

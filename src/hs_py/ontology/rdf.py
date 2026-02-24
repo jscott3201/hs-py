@@ -3,8 +3,6 @@
 Serializes a :class:`~hs_py.ontology.namespace.Namespace` to Turtle or
 JSON-LD using the official Project Haystack def URI scheme
 (``https://project-haystack.org/def/``).
-
-Requires ``rdflib`` — install via ``pip install hs-py[rdf]``.
 """
 
 from __future__ import annotations
@@ -12,9 +10,10 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from rdflib import URIRef  # type: ignore[import-not-found]
+from rdflib import RDF, RDFS, Graph, Literal, URIRef
+from rdflib import Namespace as RdfNamespace
 
+if TYPE_CHECKING:
     from hs_py.ontology.namespace import Namespace
 
 __all__ = [
@@ -35,8 +34,6 @@ def _def_uri(symbol_val: str) -> URIRef:
     :param symbol_val: Raw symbol value (e.g. ``ph::site`` or ``lib:ph``).
     :returns: A :class:`rdflib.URIRef` for the def.
     """
-    from rdflib import URIRef
-
     cleaned = symbol_val.replace("::", "/")
     return URIRef(f"{_PH_BASE}{cleaned}")
 
@@ -48,8 +45,6 @@ def _val_to_rdf_node(val: Any) -> Any:
     :returns: An rdflib Literal, URIRef, or ``None`` if the value cannot be
         represented in RDF.
     """
-    from rdflib import Literal, URIRef
-
     from hs_py.kinds import Marker, Number, Ref, Symbol, Uri
 
     if isinstance(val, Marker):
@@ -78,12 +73,10 @@ def _build_graph(ns: Namespace) -> Any:
     :param ns: Resolved :class:`~hs_py.ontology.namespace.Namespace` to export.
     :returns: Populated :class:`rdflib.Graph`.
     """
-    from rdflib import RDF, RDFS, Graph, Literal, Namespace, URIRef
-
     g = Graph()
 
     # Bind common prefixes
-    ph_ns = Namespace(_PH_BASE + "ph/")
+    ph_ns = RdfNamespace(_PH_BASE + "ph/")
     g.bind("ph", ph_ns)
     g.bind("rdf", RDF)
     g.bind("rdfs", RDFS)
@@ -125,7 +118,6 @@ def export_turtle(ns: Namespace) -> str:
 
     :param ns: Resolved :class:`~hs_py.ontology.namespace.Namespace` to export.
     :returns: Turtle-formatted RDF string.
-    :raises ImportError: If ``rdflib`` is not installed.
     """
     return _build_graph(ns).serialize(format="turtle")  # type: ignore[no-any-return]
 
@@ -135,6 +127,5 @@ def export_jsonld(ns: Namespace) -> str:
 
     :param ns: Resolved :class:`~hs_py.ontology.namespace.Namespace` to export.
     :returns: JSON-LD formatted string.
-    :raises ImportError: If ``rdflib`` is not installed.
     """
     return _build_graph(ns).serialize(format="json-ld")  # type: ignore[no-any-return]

@@ -838,6 +838,11 @@ class TestHandshakeLimits:
 
     async def test_handshake_limit_enforced(self, auth_app: Any) -> None:
         """Once MAX_HANDSHAKES is reached, new HELLOs should be rejected."""
+        # Warm up the middleware stack first.
+        transport = ASGITransport(app=auth_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            await c.get("/api/about")
+
         mw = _get_scram_middleware(auth_app)
         handshakes = mw._handshakes
 
@@ -852,7 +857,6 @@ class TestHandshakeLimits:
                 server_key=b"x",
             )
 
-        transport = ASGITransport(app=auth_app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             hello_header = f"HELLO username={_b64url_encode(b'admin')}"
             resp = await c.get(
@@ -863,6 +867,12 @@ class TestHandshakeLimits:
 
     async def test_expired_handshakes_are_purged(self, auth_app: Any) -> None:
         """Stale handshakes should be cleaned up on HELLO."""
+        # Warm up the middleware stack with a dummy request so the ASGI app
+        # materialises its middleware chain before we grab a reference.
+        transport = ASGITransport(app=auth_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            await c.get("/api/about")
+
         mw = _get_scram_middleware(auth_app)
         handshakes = mw._handshakes
 
@@ -879,7 +889,6 @@ class TestHandshakeLimits:
         assert "stale" in handshakes
 
         # A valid HELLO should purge it
-        transport = ASGITransport(app=auth_app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             hello_header = f"HELLO username={_b64url_encode(b'admin')}"
             resp = await c.get(
@@ -895,13 +904,17 @@ class TestTokenExpiry:
 
     async def test_expired_token_returns_401(self, auth_app: Any) -> None:
         """An expired token should be rejected."""
+        # Warm up the middleware stack first.
+        transport = ASGITransport(app=auth_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            await c.get("/api/about")
+
         mw = _get_scram_middleware(auth_app)
         tokens = mw._tokens
 
         # Add an expired token (created far in the past)
         tokens["expired-token"] = TokenEntry(username="admin", created=0.0)
 
-        transport = ASGITransport(app=auth_app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get(
                 "/api/about",

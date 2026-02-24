@@ -29,6 +29,7 @@ from hs_py.kinds import (
     XStr,
 )
 from hs_py.metrics import MetricsHooks
+from hs_py.ontology.rdf import export_jsonld, export_turtle
 from hs_py.ops import HaystackOps
 from hs_py.tls import (
     TLSConfig,
@@ -89,10 +90,6 @@ def __getattr__(name: str) -> object:
         from hs_py.storage.timescale import create_timescale_pool
 
         return create_timescale_pool
-    if name in ("export_turtle", "export_jsonld"):
-        from hs_py.ontology.rdf import export_jsonld, export_turtle
-
-        return export_turtle if name == "export_turtle" else export_jsonld
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
 

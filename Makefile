@@ -9,10 +9,10 @@ lint:
 	uv run ruff format --check src/ tests/
 
 typecheck:
-	uv run mypy
+	uv run --all-extras mypy
 
 test:
-	uv run pytest --tb=short -q
+	uv run --all-extras pytest --tb=short -q
 
 check: lint typecheck test
 
@@ -24,10 +24,10 @@ format:
 	uv run ruff format src/ tests/
 
 coverage:
-	uv run pytest --cov --cov-report=term-missing
+	uv run --all-extras pytest --cov --cov-report=term-missing
 
 coverage-html:
-	uv run pytest --cov --cov-report=html
+	uv run --all-extras pytest --cov --cov-report=html
 
 docs:
 	uv run --group docs sphinx-build -W -b html docs docs/_build/html

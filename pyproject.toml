@@ -4,13 +4,12 @@ version = "0.1.0"
 description = "Async Project Haystack client and ontology library for Python"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["aiohttp>=3.10", "orjson>=3.10", "cryptography>=42.0", "websockets>=14.0"]
+dependencies = ["aiohttp>=3.10", "orjson>=3.10", "cryptography>=42.0", "websockets>=14.0", "rdflib>=7.0"]
 
 [project.optional-dependencies]
 server = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "redis[hiredis]>=5.2"]
 timescale = ["asyncpg>=0.30"]
-rdf = ["rdflib>=7.0"]
-all = ["hs-py[server]", "hs-py[timescale]", "hs-py[rdf]"]
+all = ["hs-py[server]", "hs-py[timescale]"]
 
 [dependency-groups]
 test = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-cov>=6.0", "coverage>=7.0", "httpx>=0.28"]
@@ -55,7 +54,6 @@ omit = [
     "src/hs_py/redis_ops.py",
     "src/hs_py/storage/redis.py",
     "src/hs_py/storage/timescale.py",
-    "src/hs_py/ontology/rdf.py",
 ]
 
 [tool.coverage.report]
