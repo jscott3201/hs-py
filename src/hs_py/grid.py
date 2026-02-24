@@ -57,9 +57,12 @@ class Grid:
     """Row data as tag dicts keyed by column name."""
 
     _col_map: dict[str, Col] = field(init=False, repr=False, compare=False, hash=False)
+    _col_names: tuple[str, ...] = field(init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_col_map", {c.name: c for c in self.cols})
+        col_map = {c.name: c for c in self.cols}
+        object.__setattr__(self, "_col_map", col_map)
+        object.__setattr__(self, "_col_names", tuple(col_map))
 
     @property
     def is_empty(self) -> bool:
@@ -74,7 +77,7 @@ class Grid:
     @property
     def col_names(self) -> tuple[str, ...]:
         """Column names in display order."""
-        return tuple(self._col_map)
+        return self._col_names
 
     def col(self, name: str) -> Col:
         """Look up a column by name.

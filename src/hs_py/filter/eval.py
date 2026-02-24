@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from hs_py.filter.ast import And, Cmp, CmpOp, Has, Missing, Node, Or, Path
-from hs_py.grid import Grid, GridBuilder
+from hs_py.grid import Grid
 from hs_py.kinds import Number, Ref
 
 __all__ = [
@@ -56,16 +56,11 @@ def evaluate_grid(
     if resolver is None:
         resolver = _grid_resolver(grid)
 
-    matching = [row for row in grid if _eval(node, row, resolver)]
+    matching = tuple(row for row in grid if _eval(node, row, resolver))
     if not matching:
         return Grid.make_empty()
 
-    builder = GridBuilder().set_meta(dict(grid.meta))
-    for col in grid.cols:
-        builder.add_col(col.name, dict(col.meta) if col.meta else None)
-    for row in matching:
-        builder.add_row(row)
-    return builder.to_grid()
+    return Grid(meta=grid.meta, cols=grid.cols, rows=matching)
 
 
 # ---- Internal evaluation ----------------------------------------------------
@@ -101,9 +96,9 @@ def _resolve_path(path: Path, entity: dict[str, Any], resolver: Resolver | None)
     for i, name in enumerate(path.names):
         if not isinstance(current, dict):
             return _MISSING
-        if name not in current:
+        val = current.get(name, _MISSING)
+        if val is _MISSING:
             return _MISSING
-        val = current[name]
         # If not the last segment, we need to dereference through a Ref.
         if i < len(path.names) - 1:
             if not isinstance(val, Ref):

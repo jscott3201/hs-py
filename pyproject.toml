@@ -1,12 +1,12 @@
 [project]
 name = "haystack-py"
-version = "0.1.5"
+version = "0.1.6"
 description = "Async Project Haystack client and ontology library for Python"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
-authors = [{ name = "Justin Scott", email = "justin@jscott.me" }]
+authors = [{ name = "Justin Scott", email = "jscott3201@gmail.com" }]
 keywords = ["haystack", "iot", "building-automation", "smart-buildings", "bacnet", "scada", "hvac"]
 classifiers = [
     "Development Status :: 3 - Alpha",

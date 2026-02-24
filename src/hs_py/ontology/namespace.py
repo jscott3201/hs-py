@@ -43,6 +43,8 @@ class Namespace:
         self._libs: list[Lib] = []
         self._by_name: dict[str, Def] = {}
         self._subtypes: dict[str, list[str]] = {}
+        # Conjunct index: frozenset of parts → list of Defs
+        self._conjunct_index: dict[frozenset[str], list[Def]] = {}
         # Caches (invalidated on add_lib)
         self._all_defs_cache: list[Def] | None = None
         self._supertypes_cache: dict[str, list[Def]] = {}
@@ -62,10 +64,11 @@ class Namespace:
             # Index by unqualified name (first wins)
             if d.name not in self._by_name:
                 self._by_name[d.name] = d
-        # Rebuild subtype index and invalidate caches
+        # Rebuild indexes and invalidate caches
         self._rebuild_subtypes()
         self._all_defs_cache = None
         self._supertypes_cache.clear()
+        self._rebuild_conjunct_index()
 
     def _rebuild_subtypes(self) -> None:
         self._subtypes.clear()
@@ -75,6 +78,33 @@ class Namespace:
                 subs = self._subtypes.setdefault(parent, [])
                 if d.symbol.val not in subs:
                     subs.append(d.symbol.val)
+
+    def _rebuild_conjunct_index(self) -> None:
+        """Build an index from frozenset-of-parts → list of conjunct Defs."""
+        from hs_py.ontology.taxonomy import is_conjunct, resolve_conjunct_parts
+
+        self._conjunct_index.clear()
+        for d in self._get_all_defs():
+            if not is_conjunct(d.symbol.val):
+                continue
+            parts = frozenset(resolve_conjunct_parts(d.symbol.val))
+            self._conjunct_index.setdefault(parts, []).append(d)
+
+    def find_conjuncts(self, marker_names: set[str]) -> list[Def]:
+        """Return conjunct defs whose parts are all present in *marker_names*.
+
+        Uses a pre-built index for efficient lookup.
+
+        :param marker_names: Set of marker tag names present on an entity.
+        :returns: List of matching conjunct defs.
+        """
+        result: list[Def] = []
+        for parts, defs in self._conjunct_index.items():
+            if parts <= marker_names:
+                for d in defs:
+                    if d.symbol.val not in marker_names:
+                        result.append(d)
+        return result
 
     # ---- Lookup -------------------------------------------------------------
 

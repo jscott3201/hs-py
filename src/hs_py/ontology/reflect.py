@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hs_py.kinds import Symbol, sym_name
-from hs_py.ontology.taxonomy import is_conjunct, resolve_conjunct_parts
 
 if TYPE_CHECKING:
     from hs_py.ontology.defs import Def
@@ -50,7 +49,7 @@ def reflect(ns: Namespace, tags: dict[str, Any]) -> list[Def]:
                 direct.append(d)
 
     # Step 2: Check for conjuncts
-    conjuncts = _find_conjuncts(ns, marker_names)
+    conjuncts = ns.find_conjuncts(marker_names)
     direct.extend(conjuncts)
 
     # Step 3: Collect all supertypes
@@ -87,23 +86,3 @@ def fits(ns: Namespace, tags: dict[str, Any], def_symbol: str | Symbol) -> bool:
     target = sym_name(def_symbol)
     defs = reflect(ns, tags)
     return any(d.symbol.val == target or d.name == target for d in defs)
-
-
-def _find_conjuncts(ns: Namespace, marker_names: set[str]) -> list[Def]:
-    """Find conjunct defs whose parts are all present in the marker set.
-
-    For example, if ``marker_names`` contains ``hot`` and ``water``,
-    and the namespace has a ``hot-water`` def, it will be returned.
-    """
-    conjuncts: list[Def] = []
-    for d in ns.all_defs():
-        name = d.symbol.val
-        if not is_conjunct(name):
-            continue
-        # Already matched directly
-        if name in marker_names:
-            continue
-        parts = resolve_conjunct_parts(name)
-        if all(p in marker_names for p in parts):
-            conjuncts.append(d)
-    return conjuncts

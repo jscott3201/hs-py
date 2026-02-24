@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-02-24
+
+### Optimized
+
+- Zinc `encode_grid()` uses `join()` instead of `+=` string concatenation for metadata tags.
+- `Grid.col_names` cached at construction time instead of rebuilding tuple on every access.
+- `escape_str()` fast path returns input unchanged when no escaping is needed.
+- `evaluate_grid()` constructs Grid directly, reusing immutable cols tuple (no GridBuilder copy).
+- Removed unnecessary `sorted()` in timezone city map construction.
+- `_resolve_path()` uses single `dict.get()` with sentinel instead of two lookups.
+- Ontology conjunct matching uses pre-built frozenset index for O(1) lookup (was O(N) scan).
+- Redis filter fallback capped at 50,000 entities (was unbounded full-table scan).
+- `watch_poll()` batches dirty + watched ID lookups into a single Redis pipeline.
+- TimescaleDB filter fallback capped at 50,000 rows (was unbounded).
+- Zinc list encoding uses list comprehension inside `join()` to avoid generator overhead.
+- JSON pythonic transform fast path skips rebuild for common non-transformable value types.
+- CSV cell escape uses `frozenset.intersection()` instead of 4 separate `in` scans.
+- WebSocket request ID space expanded from 16-bit to 32-bit to prevent theoretical collision.
+
 ## [0.1.5] - 2026-02-24
 
 ### Security

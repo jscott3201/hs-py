@@ -81,10 +81,10 @@ def encode_grid(grid: Grid) -> str:
     lines: list[str] = []
 
     # Version + metadata line
-    ver_line = f'ver:"{_ZINC_VER}"'
+    ver_parts = [f'ver:"{_ZINC_VER}"']
     for k, v in grid.meta.items():
-        ver_line += " " + _encode_tag(k, v)
-    lines.append(ver_line)
+        ver_parts.append(_encode_tag(k, v))
+    lines.append(" ".join(ver_parts))
 
     # Column definitions
     if not grid.cols:
@@ -92,10 +92,10 @@ def encode_grid(grid: Grid) -> str:
     else:
         col_parts: list[str] = []
         for col in grid.cols:
-            part = col.name
+            parts = [col.name]
             for mk, mv in col.meta.items():
-                part += " " + _encode_tag(mk, mv)
-            col_parts.append(part)
+                parts.append(_encode_tag(mk, mv))
+            col_parts.append(" ".join(parts))
         lines.append(",".join(col_parts))
 
     # Data rows
@@ -181,7 +181,7 @@ def _encode(val: Any) -> str:
     if isinstance(val, Grid):
         return _encode_nested_grid(val)
     if isinstance(val, list):
-        items = ", ".join(_encode(v) for v in val)
+        items = ", ".join([_encode(v) for v in val])
         return f"[{items}]"
     if isinstance(val, dict):
         return _encode_dict(val)

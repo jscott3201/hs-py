@@ -234,6 +234,9 @@ def _pg_literal(name: str) -> str:
 # then alphanumeric or underscore.
 _TAG_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
+# Maximum rows to scan in Python fallback when SQL translation fails.
+_MAX_FALLBACK_ROWS = 50_000
+
 
 # ---------------------------------------------------------------------------
 # History range parsing
@@ -370,7 +373,7 @@ class TimescaleAdapter:
                 rows = await conn.fetch(base, *params)
             results = [_decode_tags(dict(row["tags"])) for row in rows]
         else:
-            base = "SELECT tags FROM hs_entities"
+            base = f"SELECT tags FROM hs_entities LIMIT {_MAX_FALLBACK_ROWS}"
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(base)
             results = []

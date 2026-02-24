@@ -90,6 +90,9 @@ def _encode_val(val: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+_CSV_ESCAPE_CHARS = frozenset(',"\n\r')
+
+
 def _escape_cell(val: str) -> str:
     """Escape a CSV cell per RFC 4180.
 
@@ -98,6 +101,6 @@ def _escape_cell(val: str) -> str:
     """
     if not val:
         return val
-    if "," in val or '"' in val or "\n" in val or "\r" in val:
+    if _CSV_ESCAPE_CHARS.intersection(val):
         return '"' + val.replace('"', '""') + '"'
     return val

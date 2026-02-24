@@ -162,7 +162,7 @@ def _get_tz_city_map() -> dict[str, str]:
         from zoneinfo import available_timezones
 
         mapping: dict[str, str] = {}
-        for name in sorted(available_timezones()):
+        for name in available_timezones():
             if "/" in name:
                 city = name.rsplit("/", 1)[1]
                 mapping[city] = name
@@ -240,6 +240,7 @@ def format_number(n: Number) -> str:
 
 # Reverse mapping of STR_ESCAPES for encoding: char → escape sequence.
 _STR_ESCAPE_ENC: dict[str, str] = {v: f"\\{k}" for k, v in STR_ESCAPES.items()}
+_ESCAPE_CHARS = frozenset(_STR_ESCAPE_ENC)
 
 
 def escape_str(s: str) -> str:
@@ -248,6 +249,9 @@ def escape_str(s: str) -> str:
     :param s: Raw string.
     :returns: Escaped string safe for Zinc encoding.
     """
+    # Fast path: no escaping needed
+    if not _ESCAPE_CHARS.intersection(s):
+        return s
     chars: list[str] = []
     for ch in s:
         esc = _STR_ESCAPE_ENC.get(ch)

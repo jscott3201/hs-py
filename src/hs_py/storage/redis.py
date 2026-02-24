@@ -71,6 +71,9 @@ _FT_INDEX = "hs_idx"
 # Maximum results from a single RediSearch query.
 _MAX_FT_RESULTS = 10_000
 
+# Maximum entities to scan in Python fallback when no tag index narrows candidates.
+_MAX_FALLBACK_SCAN = 50_000
+
 # Allowed pattern for Redis key components (Haystack identifiers).
 _SAFE_KEY_RE = re.compile(r"^[a-zA-Z0-9_:\-.~]+$")
 
@@ -464,7 +467,9 @@ class RedisAdapter:
             else:
                 candidate_ids = [str(v) for v in await self._r.sinter(*tag_keys)]
         else:
-            candidate_ids = [str(v) for v in await self._r.smembers(_IDS)]
+            # No tag narrowing — cap full scan to prevent loading entire dataset
+            all_ids = await self._r.srandmember(_IDS, _MAX_FALLBACK_SCAN)
+            candidate_ids = [str(v) for v in (all_ids or [])]
 
         if not candidate_ids:
             return []
@@ -743,21 +748,23 @@ class RedisAdapter:
         dirty_key = _watch_dirty_key(watch_id)
 
         if refresh:
-            # Return all watched entities
-            ref_vals: list[str] = [str(v) for v in await self._r.smembers(ids_key)]
-            await self._r.delete(dirty_key)
+            # Atomically get watched IDs and clear dirty set
+            pipe = self._r.pipeline()
+            pipe.smembers(ids_key)
+            pipe.delete(dirty_key)
+            results = await pipe.execute()
+            ref_vals: list[str] = [str(v) for v in results[0]]
         else:
-            # Atomically read and clear dirty set to avoid TOCTOU race
+            # Atomically read dirty + watched sets and clear dirty
             pipe = self._r.pipeline()
             pipe.smembers(dirty_key)
+            pipe.smembers(ids_key)
             pipe.delete(dirty_key)
             results = await pipe.execute()
             dirty_members = results[0]
-            ref_vals = [str(v) for v in dirty_members]
-            # Only include IDs that are still watched
-            if ref_vals:
-                watched = await self._r.smembers(ids_key)
-                ref_vals = [rv for rv in ref_vals if rv in watched]
+            watched_members = results[1]
+            watched_set = {str(v) for v in watched_members}
+            ref_vals = [str(v) for v in dirty_members if str(v) in watched_set]
 
         if not ref_vals:
             return []

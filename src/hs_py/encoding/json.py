@@ -651,6 +651,9 @@ def _decode_grid_v3(obj: dict[str, Any], _depth: int = 0) -> Grid:
 # ---------------------------------------------------------------------------
 
 
+_PYTHONIC_TYPES = (Marker, Number, Symbol, Uri, list, dict, Grid)
+
+
 def _to_pythonic(val: Any) -> Any:
     """Convert Haystack types to native Python equivalents where possible.
 
@@ -659,6 +662,8 @@ def _to_pythonic(val: Any) -> Any:
     - Symbol → str
     - Uri → str
     """
+    if not isinstance(val, _PYTHONIC_TYPES):
+        return val
     if isinstance(val, Marker):
         return True
     if isinstance(val, Number):
@@ -671,9 +676,8 @@ def _to_pythonic(val: Any) -> Any:
         return [_to_pythonic(v) for v in val]
     if isinstance(val, dict):
         return {k: _to_pythonic(v) for k, v in val.items()}
-    if isinstance(val, Grid):
-        return _pythonic_grid(val)
-    return val
+    # Grid
+    return _pythonic_grid(val)
 
 
 def _pythonic_grid(grid: Grid) -> Grid:

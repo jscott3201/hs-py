@@ -592,7 +592,7 @@ class WebSocketClient:
 
         for op, grid in calls:
             req_id = str(self._next_id)
-            self._next_id = (self._next_id + 1) & 0xFFFF
+            self._next_id = (self._next_id + 1) & 0xFFFF_FFFF
             envelopes.append({"id": req_id, "op": op, "grid": encode_grid_dict(grid)})
             fut: asyncio.Future[Grid] = loop.create_future()
             self._pending[req_id] = fut
@@ -633,7 +633,7 @@ class WebSocketClient:
         ws = self._require_ws()
         req_id_int = self._next_id
         req_id = str(req_id_int)
-        self._next_id = (self._next_id + 1) & 0xFFFF
+        self._next_id = (self._next_id + 1) & 0xFFFF_FFFF
 
         # Create future for response
         loop = asyncio.get_running_loop()
@@ -1374,7 +1374,7 @@ class WebSocketPool:
         """Send a channel-scoped request and await the response."""
         ws = self._require_ws()
         req_id = str(self._next_id)
-        self._next_id = (self._next_id + 1) & 0xFFFF
+        self._next_id = (self._next_id + 1) & 0xFFFF_FFFF
 
         envelope = orjson.dumps(
             {"id": req_id, "op": op, "grid": encode_grid_dict(grid), "ch": ch}
