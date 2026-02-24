@@ -101,13 +101,38 @@ jobs:
           name: python-package-distributions
           path: dist/
 
+  upload-release-assets:
+    needs: [release, build]
+    if: needs.release.outputs.new_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Extract version tag
+        id: version
+        run: |
+          VERSION=$(ls dist/*.tar.gz | sed 's|dist/haystack_py-||;s|\.tar\.gz||')
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: dist/*
+
   # ──────────────────────────────────────────────────────────
   # PyPI Publish
   #
   # Prerequisites (one-time setup):
   #   1. Go to https://pypi.org/manage/account/publishing/
   #   2. Add a pending publisher:
-  #      - Package name: hs-py
+  #      - Package name: haystack-py
   #      - Owner: jscott3201
   #      - Repository: hs-py
   #      - Workflow: release.yml
@@ -122,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/hs-py
+      url: https://pypi.org/p/haystack-py
     permissions:
       id-token: write
       attestations: write

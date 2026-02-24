@@ -1,7 +1,7 @@
-# hs-py
+# haystack-py
 
-[![PyPI](https://img.shields.io/pypi/v/hs-py)](https://pypi.org/project/hs-py/)
-[![Python](https://img.shields.io/pypi/pyversions/hs-py)](https://pypi.org/project/hs-py/)
+[![PyPI](https://img.shields.io/pypi/v/haystack-py)](https://pypi.org/project/haystack-py/)
+[![Python](https://img.shields.io/pypi/pyversions/haystack-py)](https://pypi.org/project/haystack-py/)
 [![License](https://img.shields.io/github/license/jscott3201/hs-py)](LICENSE)
 [![CI](https://github.com/jscott3201/hs-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jscott3201/hs-py/actions/workflows/ci.yml)
 
@@ -51,16 +51,16 @@ async with Client("http://server/api", "admin", "secret") as c:
 ## Installation
 
 ```bash
-pip install hs-py
+pip install haystack-py
 ```
 
 Optional extras:
 
 ```bash
-pip install hs-py[server]       # FastAPI + Redis backend (server-side)
-pip install hs-py[timescale]    # TimescaleDB/PostgreSQL backend
-pip install hs-py[rdf]          # RDF ontology import (rdflib)
-pip install hs-py[all]          # All optional dependencies
+pip install haystack-py[server]       # FastAPI + Redis backend (server-side)
+pip install haystack-py[timescale]    # TimescaleDB/PostgreSQL backend
+pip install haystack-py[rdf]          # RDF ontology import (rdflib)
+pip install haystack-py[all]          # All optional dependencies
 ```
 
 ### Development
@@ -224,7 +224,7 @@ defs = reflect(ns, entity_dict)
 
 ## Storage Backends
 
-hs-py defines a `StorageAdapter` protocol that decouples server operations from data storage. Three implementations are provided:
+haystack-py defines a `StorageAdapter` protocol that decouples server operations from data storage. Three implementations are provided:
 
 | Backend | Module | Best For |
 |---------|--------|----------|
@@ -326,7 +326,7 @@ All client methods raise from a common exception hierarchy:
 ```python
 from hs_py import HaystackError, CallError, AuthError, NetworkError
 
-# HaystackError         Base for all hs-py errors
+# HaystackError         Base for all haystack-py errors
 #   CallError            Server returned an error grid
 #   AuthError            Authentication failure
 #   NetworkError         Transport-level failure

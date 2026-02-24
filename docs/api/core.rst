@@ -2,7 +2,7 @@ Core
 ====
 
 Grid, errors, metrics, and the HTTP client — the foundational building blocks
-of the hs-py library.
+of the haystack-py library.
 
 Grid
 ----
@@ -26,7 +26,7 @@ Handles SCRAM authentication, automatic 401 retry, and connection management.
 Errors
 ------
 
-Exception hierarchy for the hs-py library.
+Exception hierarchy for the haystack-py library.
 
 .. automodule:: hs_py.errors
    :members:

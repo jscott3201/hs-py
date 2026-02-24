@@ -1,7 +1,7 @@
 Features
 ========
 
-hs-py provides a complete implementation of the Project Haystack protocol for
+haystack-py provides a complete implementation of the Project Haystack protocol for
 both client and server use cases. This page summarises the library's
 capabilities by category.
 

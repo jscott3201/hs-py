@@ -1,4 +1,4 @@
-"""Sphinx configuration for hs-py documentation."""
+"""Sphinx configuration for haystack-py documentation."""
 
 import sys
 from importlib.metadata import version as _pkg_version
@@ -10,11 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-project = "hs-py"
-author = "hs-py contributors"
-copyright = "2026, hs-py contributors"  # noqa: A001
+project = "haystack-py"
+author = "haystack-py contributors"
+copyright = "2026, haystack-py contributors"  # noqa: A001
 
-version = _pkg_version("hs-py")
+version = _pkg_version("haystack-py")
 release = version
 
 # -- General configuration ---------------------------------------------------
@@ -57,7 +57,7 @@ intersphinx_mapping = {
 
 html_theme = "furo"
 html_static_path = ["_static"]
-html_title = f"hs-py {version}"
+html_title = f"haystack-py {version}"
 
 # -- Warnings ----------------------------------------------------------------
 # Suppress ambiguous cross-reference warnings from autodoc resolving

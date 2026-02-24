@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate TLS certificates for Docker Redis using the hs-py CA infrastructure.
+"""Generate TLS certificates for Docker Redis using the haystack-py CA infrastructure.
 
 Writes certificates to ``docker/tls/``:
 

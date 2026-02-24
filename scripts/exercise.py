@@ -1,4 +1,4 @@
-"""Client exercise script for the hs-py Haystack server.
+"""Client exercise script for the haystack-py Haystack server.
 
 Connects to a running server and exercises all standard ops across 8 phases,
 printing timing and throughput benchmarks for each.
@@ -349,7 +349,7 @@ async def run(url: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Exercise the hs-py Haystack server")
+    parser = argparse.ArgumentParser(description="Exercise the haystack-py Haystack server")
     parser.add_argument(
         "--url",
         default="http://localhost:8080/api",

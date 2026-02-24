@@ -8,22 +8,22 @@ Install with pip:
 
 .. code-block:: bash
 
-   pip install hs-py
+   pip install haystack-py
 
 Or with `uv <https://docs.astral.sh/uv/>`_:
 
 .. code-block:: bash
 
-   uv add hs-py
+   uv add haystack-py
 
 Optional extras for server and storage backends:
 
 .. code-block:: bash
 
-   pip install hs-py[server]       # FastAPI + Redis backend
-   pip install hs-py[timescale]    # TimescaleDB/PostgreSQL backend
-   pip install hs-py[rdf]          # RDF ontology import (rdflib)
-   pip install hs-py[all]          # All optional dependencies
+   pip install haystack-py[server]       # FastAPI + Redis backend
+   pip install haystack-py[timescale]    # TimescaleDB/PostgreSQL backend
+   pip install haystack-py[rdf]          # RDF ontology import (rdflib)
+   pip install haystack-py[all]          # All optional dependencies
 
 Requirements: Python 3.13+. Core dependencies (aiohttp, orjson, cryptography,
 websockets) are installed automatically.

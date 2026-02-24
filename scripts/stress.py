@@ -1,4 +1,4 @@
-"""Two-minute stress test for the hs-py Haystack server.
+"""Two-minute stress test for the haystack-py Haystack server.
 
 Fires concurrent requests across multiple op types and reports throughput
 and latency percentiles.
@@ -288,7 +288,7 @@ async def run(url: str, duration: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stress test the hs-py server")
+    parser = argparse.ArgumentParser(description="Stress test the haystack-py server")
     parser.add_argument("--url", default="http://localhost:8080/api")
     parser.add_argument("--duration", type=int, default=DURATION)
     args = parser.parse_args()

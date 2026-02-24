@@ -1,4 +1,4 @@
-"""Two-minute WebSocket stress test for the hs-py Haystack server.
+"""Two-minute WebSocket stress test for the haystack-py Haystack server.
 
 Opens multiple persistent WebSocket connections and fires concurrent requests
 across all op types. Tests both JSON and binary frame modes.
@@ -370,7 +370,7 @@ async def run(url: str, duration: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="WebSocket stress test for hs-py")
+    parser = argparse.ArgumentParser(description="WebSocket stress test for haystack-py")
     parser.add_argument("--url", default="ws://localhost:8080/api/ws")
     parser.add_argument("--duration", type=int, default=DURATION, help="Duration per mode (s)")
     args = parser.parse_args()

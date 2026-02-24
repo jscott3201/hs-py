@@ -1,7 +1,7 @@
 Storage Backends
 ================
 
-hs-py ships with three storage backends that implement the
+haystack-py ships with three storage backends that implement the
 :class:`~hs_py.storage.protocol.StorageAdapter` protocol. All backends
 support the same set of Haystack operations — entity CRUD, filter reads,
 navigation, history, point writes, and watch subscriptions.
@@ -20,10 +20,10 @@ Choose the backend that matches your deployment needs:
      - None (built-in)
    * - **Redis**
      - Production, horizontal scaling
-     - ``redis``, ``redisvl`` (``pip install hs-py[server]``)
+     - ``redis``, ``redisvl`` (``pip install haystack-py[server]``)
    * - **TimescaleDB**
      - SQL analytics, time-series queries
-     - ``asyncpg`` (``pip install hs-py[timescale]``)
+     - ``asyncpg`` (``pip install haystack-py[timescale]``)
 
 
 Memory Backend

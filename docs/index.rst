@@ -1,10 +1,10 @@
-hs-py
-=====
+haystack-py
+===========
 
 Asynchronous `Project Haystack <https://project-haystack.org/>`_ client and
 server library for Python 3.13+.
 
-hs-py implements the Project Haystack protocol for exchanging tagged
+haystack-py implements the Project Haystack protocol for exchanging tagged
 building/IoT data with an async-first architecture built on Python's native
 ``asyncio`` framework. It provides HTTP and WebSocket transports, four wire
 formats (JSON, Zinc, Trio, CSV), SCRAM-SHA-256 and mTLS authentication,
@@ -23,7 +23,7 @@ pluggable storage backends, and full ontology support.
    asyncio.run(main())
 
 Head to :doc:`getting-started` for installation and first steps, or browse
-the :doc:`guide/client-guide` to see what hs-py can do. For server setup
+the :doc:`guide/client-guide` to see what haystack-py can do. For server setup
 with storage backends, see :doc:`guide/server-guide` and
 :doc:`guide/storage-guide`.
 

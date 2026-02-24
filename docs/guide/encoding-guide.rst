@@ -1,7 +1,7 @@
 Wire Formats
 =============
 
-hs-py supports all four Haystack wire formats.  The HTTP client and server
+haystack-py supports all four Haystack wire formats.  The HTTP client and server
 use JSON by default, but you can use any format directly for file I/O,
 message serialization, or interoperability with other systems.
 

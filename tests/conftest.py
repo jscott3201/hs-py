@@ -1,1 +1,1 @@
-"""Shared test fixtures for hs-py."""
+"""Shared test fixtures for haystack-py."""

@@ -3,7 +3,7 @@
 TLS and mTLS
 ============
 
-hs-py provides TLS configuration helpers for securing both client and server
+haystack-py provides TLS configuration helpers for securing both client and server
 connections.  This guide covers certificate setup, mutual TLS (mTLS), and
 generating test certificates for development.
 

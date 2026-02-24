@@ -3,7 +3,7 @@
 Observability
 =============
 
-hs-py provides two levels of observability: metrics hooks for structured
+haystack-py provides two levels of observability: metrics hooks for structured
 telemetry and standard Python logging for operational insight.
 
 .. seealso::
@@ -112,7 +112,7 @@ Prometheus Example
 Logging
 -------
 
-hs-py uses the standard ``logging`` module.  All loggers are under the
+haystack-py uses the standard ``logging`` module.  All loggers are under the
 ``hs_py`` namespace.
 
 Quick Setup

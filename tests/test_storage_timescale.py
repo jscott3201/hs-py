@@ -1,7 +1,7 @@
 """Integration tests for TimescaleAdapter against a real PostgreSQL/TimescaleDB.
 
 These tests require:
-1. ``asyncpg`` to be installed (``pip install hs-py[timescale]`` or
+1. ``asyncpg`` to be installed (``pip install haystack-py[timescale]`` or
    ``pip install asyncpg``).
 2. A running PostgreSQL instance at ``postgresql://postgres:test@localhost/haystack``
    (or overridden via the ``HS_PY_TIMESCALE_DSN`` environment variable).

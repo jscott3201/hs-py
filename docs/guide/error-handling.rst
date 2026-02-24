@@ -3,7 +3,7 @@
 Error Handling
 ==============
 
-hs-py uses a structured exception hierarchy to distinguish between different
+haystack-py uses a structured exception hierarchy to distinguish between different
 failure modes.  This guide covers the exception types, error grids, and
 patterns for robust error handling.
 
@@ -18,7 +18,7 @@ Exception Hierarchy
 
 .. code-block:: text
 
-   HaystackError          Base for all hs-py exceptions
+   HaystackError          Base for all haystack-py exceptions
    ├── AuthError          Authentication failures (SCRAM, token, cert)
    ├── CallError          Server returned an error grid
    └── NetworkError       Connection, timeout, transport failures
