@@ -61,7 +61,7 @@ jobs:
             exit 1
           fi
       - name: Pytest
-        run: uv run pytest --tb=short -q
+        run: uv run pytest --ignore=tests/test_e2e_docker.py --ignore=tests/test_storage_timescale.py --ignore=tests/test_redis_ops.py --ignore=tests/test_redis_tls.py --tb=short -q
 
   docs:
     runs-on: ubuntu-latest

@@ -379,7 +379,7 @@ class TestErrorMiddleware:
         assert resp.status_code == 200
         grid = decode_grid(resp.content)
         assert grid.is_error
-        assert "RuntimeError" in grid.meta["dis"]
+        assert "Internal server error" in grid.meta["dis"]
 
 
 # ---------------------------------------------------------------------------
@@ -956,7 +956,7 @@ class TestErrorMiddlewareCoversAuth:
             assert resp.status_code == 200
             grid = decode_grid(resp.content)
             assert grid.is_error
-            assert "RuntimeError" in grid.meta["dis"]
+            assert "Internal server error" in grid.meta["dis"]
 
 
 # ---------------------------------------------------------------------------

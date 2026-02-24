@@ -172,25 +172,34 @@ def _get_tz_city_map() -> dict[str, str]:
     return _tz_city_map
 
 
+_tz_cache: dict[str, ZoneInfo] = {}
+
+
 def city_to_tz(name: str) -> ZoneInfo:
     """Resolve a Haystack timezone name to a :class:`~zoneinfo.ZoneInfo`.
 
     Accepts both city-only names (``"New_York"``) and full IANA names
-    (``"America/New_York"``).
+    (``"America/New_York"``).  Results are cached to avoid repeated
+    filesystem lookups from :class:`~zoneinfo.ZoneInfo`.
 
     :param name: Haystack city name or full IANA timezone key.
     :returns: Resolved :class:`~zoneinfo.ZoneInfo` instance.
     :raises KeyError: If *name* cannot be resolved.
     """
+    cached = _tz_cache.get(name)
+    if cached is not None:
+        return cached
     try:
-        return ZoneInfo(name)
+        zi = ZoneInfo(name)
     except KeyError:
-        pass
-    full_name = _get_tz_city_map().get(name)
-    if full_name is not None:
-        return ZoneInfo(full_name)
-    msg = f"Unknown timezone: {name!r}"
-    raise KeyError(msg)
+        full_name = _get_tz_city_map().get(name)
+        if full_name is not None:
+            zi = ZoneInfo(full_name)
+        else:
+            msg = f"Unknown timezone: {name!r}"
+            raise KeyError(msg) from None
+    _tz_cache[name] = zi
+    return zi
 
 
 def parse_datetime(s: str) -> datetime.datetime:

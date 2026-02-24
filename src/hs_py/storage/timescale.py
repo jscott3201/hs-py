@@ -113,9 +113,9 @@ def _encode_tags(entity: dict[str, Any]) -> dict[str, Any]:
 
 def _decode_tags(tags: dict[str, Any]) -> dict[str, Any]:
     """Decode JSONB tags dict back to Haystack kinds using JSON v4."""
-    from hs_py.encoding.json import decode_val
+    from hs_py.encoding.json import _decode_val_v4
 
-    return {k: decode_val(v) for k, v in tags.items()}
+    return {k: _decode_val_v4(v) for k, v in tags.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +328,9 @@ class TimescaleAdapter:
         :param pool: Open asyncpg connection pool.
         """
         self._pool = pool
+        self._read_cache: dict[tuple[str, int | None], list[dict[str, Any]]] = {}
+        self._read_cache_max = 64
+        self._all_col_names: tuple[str, ...] | None = None
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -357,6 +360,11 @@ class TimescaleAdapter:
     # Entity read operations
     # -----------------------------------------------------------------------
 
+    @property
+    def all_col_names(self) -> tuple[str, ...] | None:
+        """Cached column names across all entities, or ``None`` if unknown."""
+        return self._all_col_names
+
     async def read_by_filter(
         self,
         ast: Node,
@@ -367,6 +375,9 @@ class TimescaleAdapter:
         Translates simple (single-segment) filter nodes to JSONB SQL. Falls
         back to Python-side evaluation via :func:`hs_py.filter.evaluate` for
         multi-segment paths or unsupported node types.
+
+        Results are cached by ``(sql_clause, limit)`` to avoid re-decoding
+        on repeated reads.
 
         :param ast: Parsed filter AST.
         :param limit: Maximum number of entities to return.  ``None`` means
@@ -379,12 +390,18 @@ class TimescaleAdapter:
         sql_clause = _ast_to_sql(ast, params)
 
         if sql_clause is not None:
+            cache_key = (sql_clause, limit)
+            cached = self._read_cache.get(cache_key)
+            if cached is not None:
+                return cached
             base = "SELECT tags FROM hs_entities WHERE " + sql_clause
             if limit is not None:
                 base += f" LIMIT {limit}"
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(base, *params)
             results = [_decode_tags(dict(row["tags"])) for row in rows]
+            if len(self._read_cache) < self._read_cache_max:
+                self._read_cache[cache_key] = results
         else:
             base = f"SELECT tags FROM hs_entities LIMIT {_MAX_FALLBACK_ROWS}"
             async with self._pool.acquire() as conn:
@@ -789,6 +806,14 @@ class TimescaleAdapter:
                     SET tags = EXCLUDED.tags, updated_at = now()
                 """
             )
+
+        # Compute column names for Grid construction fast path.
+        seen: dict[str, None] = {}
+        for entity in entities:
+            for key in entity:
+                if key not in seen:
+                    seen[key] = None
+        self._all_col_names = tuple(seen)
 
         return len(records)
 

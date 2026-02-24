@@ -1,6 +1,6 @@
 [project]
 name = "haystack-py"
-version = "0.1.7"
+version = "0.1.8"
 description = "Async Project Haystack client and ontology library for Python"
 readme = "README.md"
 license = "MIT"
@@ -49,6 +49,7 @@ dev = [
     { include-group = "test" },
     { include-group = "lint" },
     { include-group = "type-check" },
+    "pyinstrument>=5.0",
 ]
 
 [build-system]
@@ -82,4 +83,9 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
-exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "if __name__"]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__",
+    "^\\s*\\.\\.\\.\\s*$",
+]

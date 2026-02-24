@@ -127,7 +127,13 @@ class HaystackOps:
             limit = int(limit_val)
         ast = parse(filter_str)
         results_list = await storage.read_by_filter(ast, limit)
-        return Grid.make_rows(results_list) if results_list else Grid.make_empty()
+        if not results_list:
+            return Grid.make_empty()
+        # Use cached column names when available to skip row scanning.
+        col_names = getattr(storage, "all_col_names", None)
+        if col_names is not None:
+            return Grid.make_rows_with_col_names(results_list, col_names)
+        return Grid.make_rows(results_list)
 
     async def nav(self, grid: Grid) -> Grid:
         """Navigate the entity tree."""

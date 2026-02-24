@@ -35,7 +35,7 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 # Maximum PBKDF2 iterations to accept from a server (prevents CPU DoS).
-_MAX_SCRAM_ITERATIONS = 100_000
+_MAX_SCRAM_ITERATIONS = 1_000_000
 
 # Minimum salt length in bytes per NIST SP 800-132 (128 bits).
 _MIN_SALT_BYTES = 16

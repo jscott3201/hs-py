@@ -39,6 +39,22 @@ class Col:
             raise ValueError("Col name must not be empty")
 
 
+# Pre-built Col cache for columns with no metadata (the common case).
+_COL_CACHE: dict[str, Col] = {}
+
+
+def _get_col(name: str) -> Col:
+    """Return a cached Col with no metadata for *name*."""
+    col = _COL_CACHE.get(name)
+    if col is not None:
+        return col
+    col = Col.__new__(Col)
+    object.__setattr__(col, "name", name)
+    object.__setattr__(col, "meta", {})
+    _COL_CACHE[name] = col
+    return col
+
+
 @dataclass(frozen=True, slots=True)
 class Grid:
     """Two-dimensional tabular data with metadata.
@@ -150,8 +166,42 @@ class Grid:
             for key in row:
                 if key not in seen:
                     seen[key] = None
-        cols = tuple(Col(name=k) for k in seen)
-        return cls(cols=cols, rows=tuple(rows))
+        cols = tuple(_get_col(k) for k in seen)
+        return cls._fast_init(cols, tuple(rows))
+
+    @classmethod
+    def make_rows_with_col_names(
+        cls, rows: list[dict[str, Any]], col_names: tuple[str, ...]
+    ) -> Grid:
+        """Create a grid with pre-computed column names.
+
+        Skips the column inference scan of :meth:`make_rows` when the caller
+        already knows the column names (e.g. from a storage index).
+
+        :param rows: List of tag dicts.
+        :param col_names: Ordered column names.
+        :returns: A :class:`Grid` with the given columns and rows.
+        """
+        if not rows:
+            return cls.make_empty()
+        cols = tuple(_get_col(k) for k in col_names)
+        return cls._fast_init(cols, tuple(rows))
+
+    @classmethod
+    def _fast_init(
+        cls,
+        cols: tuple[Col, ...],
+        rows: tuple[dict[str, Any], ...],
+    ) -> Grid:
+        """Construct a Grid bypassing dataclass __init__ and __post_init__."""
+        grid = cls.__new__(cls)
+        object.__setattr__(grid, "meta", {})
+        object.__setattr__(grid, "cols", cols)
+        object.__setattr__(grid, "rows", rows)
+        col_map = {c.name: c for c in cols}
+        object.__setattr__(grid, "_col_map", col_map)
+        object.__setattr__(grid, "_col_names", tuple(col_map))
+        return grid
 
 
 _EMPTY_GRID = Grid()

@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response as StarletteResponse
 
 from hs_py._scram_core import (
@@ -28,13 +27,15 @@ from hs_py._scram_core import (
     validate_bearer,
 )
 from hs_py.content_negotiation import decode_request, encode_response, negotiate_format
-from hs_py.encoding.json import encode_grid_dict
+from hs_py.encoding.json import encode_grid as encode_grid_json
 from hs_py.errors import HaystackError
 from hs_py.grid import Grid
 from hs_py.ops import _POST_OP_METHODS, HaystackOps, dispatch_op
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
     from hs_py.auth_types import Authenticator
     from hs_py.ontology.namespace import Namespace
@@ -57,14 +58,15 @@ _401_HEADERS = {"WWW-Authenticate": "SCRAM hash=SHA-256"}
 
 
 # ---------------------------------------------------------------------------
-# SCRAM auth middleware
+# SCRAM auth middleware (pure ASGI)
 # ---------------------------------------------------------------------------
 
 
-class ScramAuthMiddleware(BaseHTTPMiddleware):
+class ScramAuthMiddleware:
     """SCRAM-SHA-256 authentication middleware for FastAPI.
 
-    Implements the Haystack SCRAM handshake:
+    Pure ASGI middleware — avoids ``BaseHTTPMiddleware`` overhead and streaming
+    issues.  Implements the Haystack SCRAM handshake:
 
     1. Client sends ``Authorization: HELLO username=<b64>``
     2. Server returns 401 with ``WWW-Authenticate: SCRAM handshakeToken=...``
@@ -76,65 +78,81 @@ class ScramAuthMiddleware(BaseHTTPMiddleware):
 
     :param app: The ASGI application to wrap.
     :param authenticator: Server-side credential store.
+    :param auth_tokens: Shared token dict (also used by the WS endpoint).
     """
 
-    def __init__(self, app: Any, authenticator: Authenticator) -> None:
-        """Initialise the middleware with an authenticator.
-
-        :param app: The ASGI application to wrap.
-        :param authenticator: Server-side :class:`~hs_py.auth_types.Authenticator`.
-        """
-        super().__init__(app)
+    def __init__(
+        self,
+        app: ASGIApp,
+        authenticator: Authenticator,
+        auth_tokens: dict[str, TokenEntry] | None = None,
+    ) -> None:
+        self.app = app
         self._authenticator = authenticator
         self._handshakes: dict[str, HandshakeState] = {}
-        self._tokens: dict[str, TokenEntry] = {}
-        self._tokens_exposed = False
+        self._tokens: dict[str, TokenEntry] = auth_tokens if auth_tokens is not None else {}
 
-    async def dispatch(self, request: Request, call_next: Any) -> StarletteResponse:
-        """Intercept each request and enforce SCRAM authentication."""
-        # Expose tokens on app.state so the WS endpoint can validate auth.
-        # Deferred from __init__ because the middleware stack wraps inner apps
-        # that do not carry a ``state`` attribute.
-        if not self._tokens_exposed:
-            request.app.state._auth_tokens = self._tokens
-            self._tokens_exposed = True
+    @property
+    def tokens(self) -> dict[str, TokenEntry]:
+        """Expose the token store (read-only access for tests)."""
+        return self._tokens
 
-        auth_header = request.headers.get("Authorization", "")
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """ASGI entry point — intercept HTTP requests for auth."""
+        if scope["type"] != "http":
+            # Pass WebSocket and lifespan through unchanged
+            await self.app(scope, receive, send)
+            return
+
+        # Extract Authorization header from raw ASGI scope
+        auth_header = ""
+        for key, value in scope.get("headers", []):
+            if key == b"authorization":
+                auth_header = value.decode("latin-1")
+                break
+
         scheme = auth_header.split()[0].upper() if auth_header else ""
 
         if scheme == "HELLO":
             result = await scram_hello(self._authenticator, self._handshakes, auth_header)
-            return StarletteResponse(
+            response = StarletteResponse(
                 status_code=result.status, headers=result.headers, content=result.body
             )
+            await response(scope, receive, send)
+            return
 
         if scheme == "SCRAM":
             result = handle_scram(self._handshakes, self._tokens, auth_header)
-            return StarletteResponse(
+            response = StarletteResponse(
                 status_code=result.status, headers=result.headers, content=result.body
             )
+            await response(scope, receive, send)
+            return
 
         if scheme == "BEARER":
             bearer_result = validate_bearer(self._tokens, auth_header)
             if bearer_result is not None:
-                return StarletteResponse(
+                response = StarletteResponse(
                     status_code=bearer_result.status,
                     headers=bearer_result.headers,
                     content=bearer_result.body,
                 )
-            # Attach authenticated username to request state
+                await response(scope, receive, send)
+                return
+            # Attach authenticated username to scope state for downstream
             params = dict(
                 p.split("=", 1) for p in auth_header.split(None, 1)[1].split(",") if "=" in p
             )
             token = params.get("authToken", "").strip()
             entry = self._tokens.get(token)
             if entry is not None:
-                request.state.username = entry.username
-            response: StarletteResponse = await call_next(request)
-            return response
+                scope.setdefault("state", {})["username"] = entry.username
+            await self.app(scope, receive, send)
+            return
 
         # No recognized auth scheme → 401
-        return StarletteResponse(status_code=401, headers=_401_HEADERS)
+        response = StarletteResponse(status_code=401, headers=_401_HEADERS)
+        await response(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +184,63 @@ def _grid_response(grid: Grid, request: Request) -> Response:
     return Response(content=body, media_type=ct)
 
 
+def _cached_grid_response(grid: Grid, request: Request, cache_key: str) -> Response:
+    """Encode a Grid with per-format caching on app.state._response_cache."""
+    accept = request.headers.get("accept", "application/json")
+    fmt = negotiate_format(accept)
+    key = (cache_key, fmt)
+    cache: dict[tuple[str, str], tuple[bytes, str]] = request.app.state._response_cache
+    cached = cache.get(key)
+    if cached is not None:
+        return Response(content=cached[0], media_type=cached[1])
+    body, ct = encode_response(grid, fmt)
+    cache[key] = (body, ct)
+    return Response(content=body, media_type=ct)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket encoding helpers
+# ---------------------------------------------------------------------------
+
+
+def _ws_encode_grid(grid: Grid) -> bytes:
+    """Encode a grid to JSON bytes using the fast orjson path."""
+    return encode_grid_json(grid)
+
+
+def _ws_cached_grid_bytes(
+    app: Any,
+    op: str,
+    msg: dict[str, Any],
+    grid: Grid,
+) -> bytes:
+    """Return cached grid bytes for read ops, encode otherwise."""
+    cache: dict[str, bytes] = app.state._ws_grid_cache
+    if op == "read":
+        grid_data = msg.get("grid")
+        if isinstance(grid_data, dict):
+            rows = grid_data.get("rows", [])
+            if rows and isinstance(rows[0], dict):
+                filt = rows[0].get("filter", "")
+                limit = rows[0].get("limit", "")
+                key = f"ws_read:{filt}:{limit}"
+                cached = cache.get(key)
+                if cached is not None:
+                    return cached
+                grid_bytes = _ws_encode_grid(grid)
+                cache[key] = grid_bytes
+                return grid_bytes
+    return _ws_encode_grid(grid)
+
+
+def _ws_envelope(grid_bytes: bytes, req_id: Any = None) -> bytes:
+    """Build a JSON envelope around pre-encoded grid bytes."""
+    if req_id is not None:
+        id_bytes = orjson.dumps(req_id)
+        return b'{"grid":' + grid_bytes + b',"id":' + id_bytes + b"}"
+    return b'{"grid":' + grid_bytes + b"}"
+
+
 # ---------------------------------------------------------------------------
 # Error handler
 # ---------------------------------------------------------------------------
@@ -184,7 +259,7 @@ async def _generic_error_handler(request: Request, exc: Exception) -> Response:
     exceptions never leak a raw 500 to Haystack clients.
     """
     _log.exception("Unhandled exception in request handler")
-    grid = Grid.make_error(f"Internal error: {type(exc).__name__}")
+    grid = Grid.make_error("Internal server error")
     return _grid_response(grid, request)
 
 
@@ -255,10 +330,13 @@ def _make_get_handler(op_name: str) -> Any:
         ops = _get_ops(request)
         if op_name == "about":
             grid = await ops.about()
+            return _cached_grid_response(grid, request, "about")
         elif op_name == "ops":
             grid = await ops.ops()
+            return _cached_grid_response(grid, request, "ops")
         elif op_name == "formats":
             grid = await ops.formats()
+            return _cached_grid_response(grid, request, "formats")
         elif op_name == "close":
             await ops.on_close()
             grid = Grid.make_empty()
@@ -287,6 +365,37 @@ def _make_post_handler(op_name: str, method_name: str) -> Any:
         return _grid_response(result_grid, request)
 
     handler.__name__ = f"{op_name}_post_handler"
+    return handler
+
+
+def _make_read_handler() -> Any:
+    """Create a cached POST handler for the read op.
+
+    Read responses are cached by (filter, limit, format) since entity data
+    is typically stable between mutations.  The cache is stored on
+    ``app.state._response_cache`` and is cleared on entity mutations.
+    """
+
+    async def handler(request: Request) -> Response:
+        await _check_op_permission(request, "read")
+        ops = _get_ops(request)
+        req_grid = await _parse_grid(request)
+        result_grid: Grid = await ops.read(req_grid)
+
+        # Build a cache key from the filter/limit in the request grid.
+        cache: dict[tuple[str, str], tuple[bytes, str]] | None = getattr(
+            request.app.state, "_response_cache", None
+        )
+        if cache is not None and req_grid.rows:
+            first = req_grid[0]
+            filter_str = first.get("filter", "")
+            limit_val = first.get("limit", "")
+            cache_key = f"read:{filter_str}:{limit_val}"
+            return _cached_grid_response(result_grid, request, cache_key)
+
+        return _grid_response(result_grid, request)
+
+    handler.__name__ = "read_post_handler"
     return handler
 
 
@@ -328,14 +437,13 @@ async def _handle_ws_single(
         result_grid = await dispatch_op(ops, op, msg)
     except HaystackError as exc:
         result_grid = Grid.make_error(str(exc))
-    except Exception as exc:
+    except Exception:
         _log.exception("Unhandled error in WS op '%s'", op)
-        result_grid = Grid.make_error(f"Internal error: {type(exc).__name__}")
+        result_grid = Grid.make_error("Internal server error")
 
-    response: dict[str, Any] = {"grid": encode_grid_dict(result_grid)}
-    if req_id is not None:
-        response["id"] = req_id
-    await websocket.send_text(orjson.dumps(response).decode())
+    grid_bytes = _ws_cached_grid_bytes(websocket.app, op, msg, result_grid)
+    payload = _ws_envelope(grid_bytes, req_id)
+    await websocket.send_text(payload.decode())
 
 
 async def _handle_ws_batch(
@@ -346,7 +454,7 @@ async def _handle_ws_batch(
     if not items:
         return
 
-    async def _dispatch_item(item: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch_item(item: dict[str, Any]) -> bytes:
         r_id = item.get("id")
         r_op = item.get("op", "")
         try:
@@ -354,16 +462,15 @@ async def _handle_ws_batch(
             r_grid = await dispatch_op(ops, r_op, item)
         except HaystackError as exc:
             r_grid = Grid.make_error(str(exc))
-        except Exception as exc:
+        except Exception:
             _log.exception("Unhandled error in batch WS op '%s'", r_op)
-            r_grid = Grid.make_error(f"Internal error: {type(exc).__name__}")
-        resp: dict[str, Any] = {"grid": encode_grid_dict(r_grid)}
-        if r_id is not None:
-            resp["id"] = r_id
-        return resp
+            r_grid = Grid.make_error("Internal server error")
+        grid_bytes = _ws_cached_grid_bytes(websocket.app, r_op, item, r_grid)
+        return _ws_envelope(grid_bytes, r_id)
 
-    responses = await asyncio.gather(*[_dispatch_item(item) for item in items])
-    await websocket.send_text(orjson.dumps(list(responses)).decode())
+    item_bytes = await asyncio.gather(*[_dispatch_item(item) for item in items])
+    payload = b"[" + b",".join(item_bytes) + b"]"
+    await websocket.send_text(payload.decode())
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +492,13 @@ def _build_router() -> APIRouter:
 
     # POST ops
     for op_name, method_name in _POST_OP_METHODS.items():
+        if op_name == "read":
+            handler = _make_read_handler()
+        else:
+            handler = _make_post_handler(op_name, method_name)
         router.add_api_route(
             f"/{op_name}",
-            _make_post_handler(op_name, method_name),
+            handler,
             methods=["POST"],
         )
 
@@ -410,7 +521,7 @@ def _build_router() -> APIRouter:
 
         # Check if SCRAM auth is enabled — require token on WS too
         auth_tokens: dict[str, TokenEntry] | None = getattr(
-            websocket.app.state, "_auth_tokens", None
+            websocket.app.state, "auth_tokens", None
         )
         if auth_tokens is not None:
             try:
@@ -480,11 +591,63 @@ def _build_router() -> APIRouter:
 
 def _build_user_router(user_store: UserStore) -> APIRouter:
     """Build an APIRouter with user management CRUD endpoints."""
+    from pydantic import BaseModel
     from starlette.responses import JSONResponse
 
     from hs_py.user import Role
 
     router = APIRouter(prefix="/users", tags=["users"])
+
+    # -- Pydantic request/response models ------------------------------------
+
+    class CreateUserRequest(BaseModel):
+        """Request body for creating a new user."""
+
+        username: str
+        password: str
+        first_name: str = ""
+        last_name: str = ""
+        email: str = ""
+        role: str = "viewer"
+        enabled: bool = True
+
+    class UpdateUserRequest(BaseModel):
+        """Request body for updating a user (all fields optional)."""
+
+        password: str | None = None
+        first_name: str | None = None
+        last_name: str | None = None
+        email: str | None = None
+        role: str | None = None
+        enabled: bool | None = None
+
+    class UserResponse(BaseModel):
+        """Public user representation (no credentials)."""
+
+        username: str
+        first_name: str
+        last_name: str
+        email: str
+        role: str
+        enabled: bool
+        created_at: float
+        updated_at: float
+
+    # -- Dependencies --------------------------------------------------------
+
+    async def _get_current_user(request: Request) -> Any:
+        """FastAPI dependency: resolve authenticated user from request state.
+
+        :returns: The :class:`~hs_py.user.User` object.
+        :raises HaystackError: If not authenticated or user not found.
+        """
+        username: str | None = getattr(request.state, "username", None)
+        if username is None:
+            raise HaystackError("Authentication required")
+        user = await user_store.get_user(username)
+        if user is None or not user.enabled:
+            raise HaystackError("Authentication required")
+        return user
 
     async def _require_admin(request: Request) -> str:
         """Extract authenticated username and verify admin role.
@@ -492,33 +655,30 @@ def _build_user_router(user_store: UserStore) -> APIRouter:
         :returns: The authenticated username.
         :raises HaystackError: If not authenticated or not an admin.
         """
-        username: str | None = getattr(request.state, "username", None)
-        if username is None:
-            raise HaystackError("Authentication required")
-        user = await user_store.get_user(username)
-        if user is None or user.role != Role.ADMIN:
+        user = await _get_current_user(request)
+        if user.role != Role.ADMIN:
             raise HaystackError("Admin access required")
-        return username
+        return str(user.username)
 
-    def _user_response(user: Any) -> dict[str, Any]:
-        """Convert a User to a JSON-safe dict (no credentials)."""
-        return {
-            "username": user.username,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "email": user.email,
-            "role": user.role.value,
-            "enabled": user.enabled,
-            "created_at": user.created_at,
-            "updated_at": user.updated_at,
-        }
+    def _user_response(user: Any) -> UserResponse:
+        """Convert a User to a Pydantic response model (no credentials)."""
+        return UserResponse(
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            email=user.email,
+            role=user.role.value,
+            enabled=user.enabled,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )
 
     @router.get("/")
     async def list_users(request: Request) -> JSONResponse:
         """List all users (admin-only)."""
         await _require_admin(request)
         users = await user_store.list_users()
-        return JSONResponse([_user_response(u) for u in users])
+        return JSONResponse([_user_response(u).model_dump() for u in users])
 
     @router.get("/{username}")
     async def get_user(request: Request, username: str) -> JSONResponse:
@@ -527,38 +687,29 @@ def _build_user_router(user_store: UserStore) -> APIRouter:
         user = await user_store.get_user(username)
         if user is None:
             return JSONResponse({"error": f"User not found: {username!r}"}, status_code=404)
-        return JSONResponse(_user_response(user))
+        return JSONResponse(_user_response(user).model_dump())
 
     @router.post("/")
     async def create_user_endpoint(request: Request) -> JSONResponse:
-        """Create a new user (admin-only).
-
-        Request body (JSON)::
-
-            {
-                "username": "alice",
-                "password": "secret",
-                "first_name": "Alice",
-                "last_name": "Smith",
-                "email": "alice@example.com",
-                "role": "operator",
-            }
-        """
+        """Create a new user (admin-only)."""
         await _require_admin(request)
-        body = await request.json()
-        username = body.get("username", "").strip()
-        password = body.get("password", "").strip()
+        raw = await request.json()
+        try:
+            body = CreateUserRequest(**raw)
+        except Exception:
+            return JSONResponse({"error": "Invalid request body"}, status_code=400)
+        username = body.username.strip()
+        password = body.password.strip()
         if not username or not password:
             return JSONResponse({"error": "username and password are required"}, status_code=400)
 
         from hs_py.user import create_user as _create_user
 
-        role_str = body.get("role", "viewer")
         try:
-            role = Role(role_str)
+            role = Role(body.role)
         except ValueError:
             return JSONResponse(
-                {"error": f"Invalid role: {role_str!r}. Must be admin, operator, or viewer"},
+                {"error": f"Invalid role: {body.role!r}. Must be admin, operator, or viewer"},
                 status_code=400,
             )
 
@@ -566,48 +717,39 @@ def _build_user_router(user_store: UserStore) -> APIRouter:
             user = _create_user(
                 username=username,
                 password=password,
-                first_name=body.get("first_name", ""),
-                last_name=body.get("last_name", ""),
-                email=body.get("email", ""),
+                first_name=body.first_name,
+                last_name=body.last_name,
+                email=body.email,
                 role=role,
-                enabled=body.get("enabled", True),
+                enabled=body.enabled,
             )
             await user_store.create_user(user)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        return JSONResponse(_user_response(user), status_code=201)
+        return JSONResponse(_user_response(user).model_dump(), status_code=201)
 
     @router.put("/{username}")
     async def update_user_endpoint(request: Request, username: str) -> JSONResponse:
-        """Update an existing user (admin-only).
-
-        Request body (JSON) — all fields optional::
-
-            {
-                "password": "new-secret",
-                "first_name": "Alice",
-                "last_name": "Jones",
-                "email": "alice@newdomain.com",
-                "role": "admin",
-                "enabled": false,
-            }
-        """
+        """Update an existing user (admin-only)."""
         await _require_admin(request)
-        body = await request.json()
-
-        # Convert role string to Role enum before passing to storage
-        if "role" in body:
-            role_str = body["role"]
+        raw = await request.json()
+        try:
+            body = UpdateUserRequest(**raw)
+        except Exception:
+            return JSONResponse({"error": "Invalid request body"}, status_code=400)
+        fields: dict[str, Any] = {}
+        for field_name in ("password", "first_name", "last_name", "email", "enabled"):
+            val = getattr(body, field_name)
+            if val is not None:
+                fields[field_name] = val
+        if body.role is not None:
             try:
-                body["role"] = Role(role_str)
+                fields["role"] = Role(body.role)
             except ValueError:
                 return JSONResponse(
-                    {"error": f"Invalid role: {role_str!r}. Must be admin, operator, or viewer"},
+                    {"error": f"Invalid role: {body.role!r}. Must be admin, operator, or viewer"},
                     status_code=400,
                 )
-
-        allowed = {"password", "first_name", "last_name", "email", "role", "enabled"}
-        fields = {k: v for k, v in body.items() if k in allowed}
         if not fields:
             return JSONResponse({"error": "No valid fields to update"}, status_code=400)
 
@@ -615,7 +757,7 @@ def _build_user_router(user_store: UserStore) -> APIRouter:
             updated = await user_store.update_user(username, **fields)
         except KeyError:
             return JSONResponse({"error": f"User not found: {username!r}"}, status_code=404)
-        return JSONResponse(_user_response(updated))
+        return JSONResponse(_user_response(updated).model_dump())
 
     @router.delete("/{username}")
     async def delete_user_endpoint(request: Request, username: str) -> JSONResponse:
@@ -644,6 +786,7 @@ def create_fastapi_app(
     namespace: Namespace | None = None,
     user_store: UserStore | None = None,
     prefix: str = "/api",
+    cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Create a FastAPI application with Haystack HTTP routes.
 
@@ -665,6 +808,9 @@ def create_fastapi_app(
         user management.  When provided, user CRUD endpoints are mounted under
         ``{prefix}/users/`` and superuser bootstrapping runs at startup.
     :param prefix: URL path prefix for all Haystack routes (default ``"/api"``).
+    :param cors_origins: Optional list of allowed CORS origins.  When provided,
+        ``CORSMiddleware`` is added with credentials support.  Example:
+        ``["http://localhost:3000", "https://app.example.com"]``.
     :returns: Configured :class:`fastapi.FastAPI` application.
 
     Example::
@@ -685,9 +831,29 @@ def create_fastapi_app(
     app.state.ops = ops
     app.state.storage = storage
     app.state.user_store = user_store
+    app.state._response_cache = {}
+    app.state._ws_grid_cache = {}
 
+    # Shared token store — set on app.state before middleware so both the
+    # SCRAM middleware and the WS endpoint reference the same dict.
+    auth_tokens: dict[str, TokenEntry] | None = None
     if authenticator is not None:
-        app.add_middleware(ScramAuthMiddleware, authenticator=authenticator)
+        auth_tokens = {}
+        app.state.auth_tokens = auth_tokens
+        app.add_middleware(
+            ScramAuthMiddleware, authenticator=authenticator, auth_tokens=auth_tokens
+        )
+
+    if cors_origins:
+        from starlette.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     @app.middleware("http")
     async def error_and_security_headers(request: Request, call_next: Any) -> StarletteResponse:
@@ -702,13 +868,13 @@ def create_fastapi_app(
             response: StarletteResponse = await call_next(request)
         except HaystackError as exc:
             response = _grid_response(Grid.make_error(str(exc)), request)
-        except Exception as exc:
+        except Exception:
             _log.exception("Unhandled exception in request handler")
-            response = _grid_response(
-                Grid.make_error(f"Internal error: {type(exc).__name__}"), request
-            )
+            response = _grid_response(Grid.make_error("Internal server error"), request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         return response
 
     app.add_exception_handler(HaystackError, _haystack_error_handler)

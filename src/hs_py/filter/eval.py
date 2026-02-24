@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from hs_py.filter.ast import And, Cmp, CmpOp, Has, Missing, Node, Or, Path
+from hs_py.filter.ast import And, Cmp, CmpOp, Has, Missing, Node, Or
 from hs_py.grid import Grid
 from hs_py.kinds import Number, Ref
 
@@ -65,53 +65,92 @@ def evaluate_grid(
 
 # ---- Internal evaluation ----------------------------------------------------
 
+#: Sentinel for missing tag values (distinct from None).
+_MISSING = object()
+
+# Pre-compute CmpOp members for identity comparison (avoids Enum __eq__).
+_OP_EQ = CmpOp.EQ
+_OP_NE = CmpOp.NE
+_OP_LT = CmpOp.LT
+_OP_LE = CmpOp.LE
+_OP_GT = CmpOp.GT
+
+
+def _eval_has(node: Has, entity: dict[str, Any], resolver: Resolver | None) -> bool:
+    names = node.path.names
+    if len(names) == 1:
+        return names[0] in entity
+    return _resolve_path_multi(names, entity, resolver) is not _MISSING
+
+
+def _eval_missing(node: Missing, entity: dict[str, Any], resolver: Resolver | None) -> bool:
+    names = node.path.names
+    if len(names) == 1:
+        return names[0] not in entity
+    return _resolve_path_multi(names, entity, resolver) is _MISSING
+
+
+def _eval_cmp(node: Cmp, entity: dict[str, Any], resolver: Resolver | None) -> bool:
+    names = node.path.names
+    if len(names) == 1:
+        val = entity.get(names[0], _MISSING)
+    else:
+        val = _resolve_path_multi(names, entity, resolver)
+    if val is _MISSING:
+        return False
+    return _compare(val, node.op, node.val)
+
+
+def _eval_and(node: And, entity: dict[str, Any], resolver: Resolver | None) -> bool:
+    return _eval(node.left, entity, resolver) and _eval(node.right, entity, resolver)
+
+
+def _eval_or(node: Or, entity: dict[str, Any], resolver: Resolver | None) -> bool:
+    return _eval(node.left, entity, resolver) or _eval(node.right, entity, resolver)
+
+
+# Type → handler dispatch table (O(1) lookup instead of isinstance chain).
+_EVAL_DISPATCH: dict[type, Callable[..., bool]] = {
+    Has: _eval_has,
+    Missing: _eval_missing,
+    Cmp: _eval_cmp,
+    And: _eval_and,
+    Or: _eval_or,
+}
+
 
 def _eval(node: Node, entity: dict[str, Any], resolver: Resolver | None) -> bool:
-    if isinstance(node, Has):
-        val = _resolve_path(node.path, entity, resolver)
-        return val is not _MISSING
-    if isinstance(node, Missing):
-        val = _resolve_path(node.path, entity, resolver)
-        return val is _MISSING
-    if isinstance(node, Cmp):
-        val = _resolve_path(node.path, entity, resolver)
-        if val is _MISSING:
-            return False
-        return _compare(val, node.op, node.val)
-    if isinstance(node, And):
-        return _eval(node.left, entity, resolver) and _eval(node.right, entity, resolver)
-    if isinstance(node, Or):
-        return _eval(node.left, entity, resolver) or _eval(node.right, entity, resolver)
+    handler = _EVAL_DISPATCH.get(type(node))
+    if handler is not None:
+        return handler(node, entity, resolver)
     msg = f"Unknown node type: {type(node).__name__}"
     raise TypeError(msg)
 
 
-#: Sentinel for missing tag values (distinct from None).
-_MISSING = object()
-
-
-def _resolve_path(path: Path, entity: dict[str, Any], resolver: Resolver | None) -> Any:
-    """Walk a path expression, returning _MISSING if any segment fails."""
+def _resolve_path_multi(
+    names: tuple[str, ...], entity: dict[str, Any], resolver: Resolver | None
+) -> Any:
+    """Walk a multi-segment path, returning _MISSING if any segment fails."""
     current: Any = entity
-    for i, name in enumerate(path.names):
+    last = len(names) - 1
+    for i in range(last):
         if not isinstance(current, dict):
             return _MISSING
-        val = current.get(name, _MISSING)
+        val = current.get(names[i], _MISSING)
         if val is _MISSING:
             return _MISSING
-        # If not the last segment, we need to dereference through a Ref.
-        if i < len(path.names) - 1:
-            if not isinstance(val, Ref):
-                return _MISSING
-            if resolver is None:
-                return _MISSING
-            resolved = resolver(val)
-            if resolved is None:
-                return _MISSING
-            current = resolved
-        else:
-            return val
-    return _MISSING  # pragma: no cover — unreachable with non-empty path
+        if not isinstance(val, Ref):
+            return _MISSING
+        if resolver is None:
+            return _MISSING
+        resolved = resolver(val)
+        if resolved is None:
+            return _MISSING
+        current = resolved
+    # Last segment — just a dict lookup.
+    if not isinstance(current, dict):
+        return _MISSING
+    return current.get(names[last], _MISSING)
 
 
 def _compare(left: Any, op: CmpOp, right: Any) -> bool:
@@ -119,40 +158,36 @@ def _compare(left: Any, op: CmpOp, right: Any) -> bool:
 
     Number comparison uses numeric value only (unit-agnostic).
     """
-    if op == CmpOp.EQ:
+    if op is _OP_EQ:
         return _eq(left, right)
-    if op == CmpOp.NE:
+    if op is _OP_NE:
         return not _eq(left, right)
     return _ordered_cmp(left, op, right)
 
 
 def _eq(left: Any, right: Any) -> bool:
     """Equality check with Number-aware comparison."""
-    if isinstance(left, Number) and isinstance(right, Number):
-        return _num_val(left) == _num_val(right) and left.unit == right.unit
-    if isinstance(left, Ref) and isinstance(right, Ref):
+    if type(left) is Number and type(right) is Number:
+        return left.val == right.val and left.unit == right.unit
+    if type(left) is Ref and type(right) is Ref:
         return left.val == right.val
     return left == right  # type: ignore[no-any-return]
 
 
 def _ordered_cmp(left: Any, op: CmpOp, right: Any) -> bool:
     """Ordered comparison (<, <=, >, >=)."""
-    lv = _num_val(left) if isinstance(left, Number) else left
-    rv = _num_val(right) if isinstance(right, Number) else right
+    lv = left.val if type(left) is Number else left
+    rv = right.val if type(right) is Number else right
     try:
-        if op == CmpOp.LT:
+        if op is _OP_LT:
             return lv < rv
-        if op == CmpOp.LE:
+        if op is _OP_LE:
             return lv <= rv
-        if op == CmpOp.GT:
+        if op is _OP_GT:
             return lv > rv
         return lv >= rv
     except TypeError:
         return False
-
-
-def _num_val(n: Number) -> float:
-    return n.val
 
 
 def _grid_resolver(grid: Grid) -> Resolver | None:

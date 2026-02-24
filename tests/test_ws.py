@@ -436,7 +436,7 @@ class TestWebSocketErrors:
         async with WebSocketClient(url, pythonic=False) as client:
             with pytest.raises(CallError) as exc_info:
                 await client.nav()
-            assert "Internal error" in str(exc_info.value)
+            assert "Internal server error" in str(exc_info.value)
 
     async def test_unknown_op(self, ws_pair: tuple[WebSocketServer, str]) -> None:
         _, url = ws_pair

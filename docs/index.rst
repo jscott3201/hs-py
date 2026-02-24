@@ -51,6 +51,7 @@ with storage backends, see :doc:`guide/server-guide` and
    guide/watch-guide
    guide/error-handling
    guide/observability
+   guide/benchmarks
 
 .. toctree::
    :caption: API Reference

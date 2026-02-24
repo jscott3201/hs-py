@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import logging
 import socket
+from collections import deque
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -133,7 +134,7 @@ class HaystackWebSocket:
         self._reader = reader
         self._writer = writer
         self._protocol = protocol
-        self._pending_frames: list[Frame] = []
+        self._pending_frames: deque[Frame] = deque()
 
     # -- Client factory --
 
@@ -283,6 +284,18 @@ class HaystackWebSocket:
         if _write_pending(self._protocol, self._writer):
             await self._writer.drain()
 
+    async def send_text_preencoded(self, data: bytes) -> None:
+        """Send pre-encoded UTF-8 bytes as a text WebSocket frame.
+
+        Avoids the ``str → encode → bytes`` roundtrip when the caller
+        already holds a UTF-8 byte string (e.g. from :func:`orjson.dumps`).
+
+        :param data: UTF-8 encoded payload bytes.
+        """
+        self._protocol.send_text(data)
+        if _write_pending(self._protocol, self._writer):
+            await self._writer.drain()
+
     async def send_bytes(self, data: bytes) -> None:
         """Send a binary WebSocket frame.
 
@@ -308,7 +321,7 @@ class HaystackWebSocket:
         while True:
             # Drain buffered frames first
             while self._pending_frames:
-                frame = self._pending_frames.pop(0)
+                frame = self._pending_frames.popleft()
                 result = self._handle_frame(frame)
                 if result is not None:
                     await self._flush_outgoing()

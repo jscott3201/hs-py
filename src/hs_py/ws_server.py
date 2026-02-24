@@ -26,7 +26,7 @@ from hs_py._scram_core import (
     handle_scram,
     scram_hello,
 )
-from hs_py.encoding.json import encode_grid_dict
+from hs_py.encoding.json import encode_grid as encode_grid_json
 from hs_py.errors import HaystackError
 from hs_py.grid import Grid
 from hs_py.metrics import MetricsHooks, _fire
@@ -53,6 +53,19 @@ _log = logging.getLogger(__name__)
 
 # Maximum concurrent connections to prevent resource exhaustion.
 _MAX_CONNECTIONS = 1000
+
+
+def _ws_envelope(grid_bytes: bytes, req_id: Any = None, ch: Any = None) -> bytes:
+    """Build a JSON envelope around pre-encoded grid bytes."""
+    parts = [b'{"grid":', grid_bytes]
+    if req_id is not None:
+        parts.append(b',"id":')
+        parts.append(orjson.dumps(req_id))
+    if ch is not None:
+        parts.append(b',"ch":')
+        parts.append(orjson.dumps(ch))
+    parts.append(b"}")
+    return b"".join(parts)
 
 
 class WebSocketServer:
@@ -116,6 +129,8 @@ class WebSocketServer:
         # SCRAM state shared across connections
         self._handshakes: dict[str, HandshakeState] = {}
         self._tokens: dict[str, TokenEntry] = {}
+        # Response cache for read ops (grid bytes keyed by filter+limit)
+        self._ws_grid_cache: dict[str, bytes] = {}
         # Wire push handler so ops can trigger watch pushes
         self._ops.set_push_handler(self.push_watch)
 
@@ -165,11 +180,35 @@ class WebSocketServer:
                 with contextlib.suppress(Exception):
                     await ws.send_bytes(frame)
         else:
-            grid_json = encode_grid_dict(grid)
-            msg = orjson.dumps({"type": "watch", "watchId": watch_id, "grid": grid_json}).decode()
+            grid_bytes = encode_grid_json(grid)
+            wid_bytes = orjson.dumps(watch_id)
+            payload = b'{"type":"watch","watchId":' + wid_bytes + b',"grid":' + grid_bytes + b"}"
             for ws in connections:
                 with contextlib.suppress(Exception):
-                    await ws.send_text(msg)
+                    await ws.send_text_preencoded(payload)
+
+    def _cached_grid_bytes(
+        self,
+        op: str,
+        msg: dict[str, Any],
+        grid: Grid,
+    ) -> bytes:
+        """Return cached grid bytes for read ops, encode otherwise."""
+        if op == "read":
+            grid_data = msg.get("grid")
+            if isinstance(grid_data, dict):
+                rows = grid_data.get("rows", [])
+                if rows and isinstance(rows[0], dict):
+                    filt = rows[0].get("filter", "")
+                    limit = rows[0].get("limit", "")
+                    key = f"ws_read:{filt}:{limit}"
+                    cached = self._ws_grid_cache.get(key)
+                    if cached is not None:
+                        return cached
+                    grid_bytes = encode_grid_json(grid)
+                    self._ws_grid_cache[key] = grid_bytes
+                    return grid_bytes
+        return encode_grid_json(grid)
 
     # ---- Connection handling -----------------------------------------------
 
@@ -412,17 +451,12 @@ class WebSocketServer:
         except Exception as exc:
             _log.exception("Unhandled error in op '%s'", op)
             _fire(self._metrics.on_error, op, type(exc).__name__)
-            result_grid = Grid.make_error(f"Internal error: {type(exc).__name__}")
+            result_grid = Grid.make_error("Internal server error")
 
-        grid_json = encode_grid_dict(result_grid)
-        response: dict[str, Any] = {"grid": grid_json}
-        if req_id is not None:
-            response["id"] = req_id
-        if ch is not None:
-            response["ch"] = ch
-        response_bytes = orjson.dumps(response).decode()
-        await ws.send_text(response_bytes)
-        _fire(self._metrics.on_ws_message_sent, op, len(response_bytes))
+        grid_bytes = self._cached_grid_bytes(op, msg, result_grid)
+        payload = _ws_envelope(grid_bytes, req_id, ch)
+        await ws.send_text_preencoded(payload)
+        _fire(self._metrics.on_ws_message_sent, op, len(payload))
 
     async def _handle_binary_message(self, ws: HaystackWebSocket, data: bytes) -> None:
         """Dispatch a binary frame request."""
@@ -448,30 +482,31 @@ class WebSocketServer:
         except Exception as exc:
             _log.exception("Unhandled error in binary op '%s'", op)
             _fire(self._metrics.on_error, op, type(exc).__name__)
-            result_grid = Grid.make_error(f"Internal error: {type(exc).__name__}")
+            result_grid = Grid.make_error("Internal server error")
 
         response = encode_binary_response(req_id, op, result_grid, is_error=result_grid.is_error)
         await ws.send_bytes(response)
         _fire(self._metrics.on_ws_message_sent, op, len(response))
 
     async def _handle_batch(self, ws: HaystackWebSocket, batch: list[Any]) -> None:
-        """Dispatch a batch of JSON request envelopes and send array response."""
-        responses: list[dict[str, Any]] = []
-        for item in batch:
-            if not isinstance(item, dict):
-                continue
-            req_id = item.get("id")
-            op = item.get("op", "")
+        """Dispatch a batch of JSON request envelopes concurrently."""
+        items = [item for item in batch if isinstance(item, dict)]
+        if not items:
+            return
+
+        async def _dispatch_item(item: dict[str, Any]) -> bytes:
+            r_id = item.get("id")
+            r_op = item.get("op", "")
             try:
-                result_grid = await dispatch_op(self._ops, op, item)
+                r_grid = await dispatch_op(self._ops, r_op, item)
             except HaystackError as exc:
-                result_grid = Grid.make_error(str(exc))
-            except Exception as exc:
-                _log.exception("Unhandled error in batch op '%s'", op)
-                result_grid = Grid.make_error(f"Internal error: {type(exc).__name__}")
-            grid_json = encode_grid_dict(result_grid)
-            resp: dict[str, Any] = {"grid": grid_json}
-            if req_id is not None:
-                resp["id"] = req_id
-            responses.append(resp)
-        await ws.send_text(orjson.dumps(responses).decode())
+                r_grid = Grid.make_error(str(exc))
+            except Exception:
+                _log.exception("Unhandled error in batch op '%s'", r_op)
+                r_grid = Grid.make_error("Internal server error")
+            grid_bytes = self._cached_grid_bytes(r_op, item, r_grid)
+            return _ws_envelope(grid_bytes, r_id)
+
+        item_bytes = await asyncio.gather(*[_dispatch_item(item) for item in items])
+        payload = b"[" + b",".join(item_bytes) + b"]"
+        await ws.send_text_preencoded(payload)

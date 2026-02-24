@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from hs_py.encoding.json import decode_val, encode_val
+from hs_py.encoding.json import _decode_val_v4, encode_val
 from hs_py.filter import evaluate
 from hs_py.filter.ast import And, Cmp, CmpOp, Has, Missing, Node, Or
 from hs_py.kinds import Number, Ref
@@ -140,7 +140,7 @@ def _decode_entity(raw: dict[str, Any]) -> dict[str, Any]:
     Strips the internal ``_tags`` index field.
     """
     raw.pop("_tags", None)
-    return {k: decode_val(v) for k, v in raw.items()}
+    return {k: _decode_val_v4(v) for k, v in raw.items()}
 
 
 def _extract_has_tags(node: Node) -> set[str]:
@@ -307,6 +307,9 @@ class RedisAdapter:
 
     def __init__(self, redis: Redis[str]) -> None:
         self._r = redis
+        self._read_cache: dict[tuple[str, int | None], list[dict[str, Any]]] = {}
+        self._read_cache_max = 64
+        self._all_col_names: tuple[str, ...] | None = None
 
     # ---- Lifecycle -----------------------------------------------------------
 
@@ -438,6 +441,11 @@ class RedisAdapter:
 
     # ---- StorageAdapter methods ----------------------------------------------
 
+    @property
+    def all_col_names(self) -> tuple[str, ...] | None:
+        """Cached column names across all entities, or ``None`` if unknown."""
+        return self._all_col_names
+
     async def read_by_filter(
         self,
         ast: Node,
@@ -457,7 +465,14 @@ class RedisAdapter:
         # Try to fully delegate to RediSearch
         ft_query = _build_ft_query(ast)
         if ft_query is not None:
-            return await self._ft_search(ft_query, limit)
+            cache_key = (ft_query, limit)
+            cached = self._read_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            results = await self._ft_search(ft_query, limit)
+            if len(self._read_cache) < self._read_cache_max:
+                self._read_cache[cache_key] = results
+            return results
 
         # Fallback: use tag index Sets for candidate narrowing, then Python eval
         has_tags = _extract_has_tags(ast)
@@ -651,7 +666,7 @@ class RedisAdapter:
             level_str = str(level)
             if level_str in raw:
                 val_json = orjson.loads(raw[level_str])
-                row["val"] = decode_val(val_json)
+                row["val"] = _decode_val_v4(val_json)
             rows.append(row)
         return rows
 
@@ -814,6 +829,13 @@ class RedisAdapter:
         if skipped:
             _log.warning("Skipped %d rows without 'id' Ref during load", skipped)
         _log.info("Loaded %d entities into Redis", count)
+        # Compute column names for Grid construction fast path.
+        seen: dict[str, None] = {}
+        for entity in entities:
+            for key in entity:
+                if key not in seen:
+                    seen[key] = None
+        self._all_col_names = tuple(seen)
         return count
 
     # ---- UserStore implementation --------------------------------------------

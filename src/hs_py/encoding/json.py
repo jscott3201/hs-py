@@ -110,7 +110,11 @@ def encode_grid(grid: Grid, *, version: JsonVersion = JsonVersion.V4) -> bytes:
     """
     if version is JsonVersion.V3:
         return orjson.dumps(_encode_grid_v3(grid))
-    return orjson.dumps(_encode_grid_v4(grid))
+    return orjson.dumps(
+        _encode_grid_v4_raw(grid),
+        default=_orjson_default_v4,
+        option=orjson.OPT_PASSTHROUGH_DATACLASS | orjson.OPT_PASSTHROUGH_DATETIME,
+    )
 
 
 def encode_grid_dict(grid: Grid, *, version: JsonVersion = JsonVersion.V4) -> dict[str, Any]:
@@ -177,48 +181,146 @@ def decode_grid(
 
 
 def _encode_val_v4(val: Any) -> Any:
-    """Encode a value using Haystack 4 JSON format."""
+    """Encode a value using Haystack 4 JSON format.
+
+    Uses a type dispatch table for O(1) lookup of Haystack kind encoders,
+    with fast-path checks for the most common types (None, str, int, float).
+    """
+    # Fast path: most common types by identity/type
     if val is None:
         return None
+    typ = type(val)
+    if typ is str:
+        return val
+    if typ is int or typ is float:
+        return val
+    if typ is bool:
+        return val
+
+    # Singleton identity checks (guaranteed single-instance)
+    if val is MARKER:
+        return _MARKER_V4
+    if val is NA:
+        return _NA_V4
+    if val is REMOVE:
+        return _REMOVE_V4
+
+    # Dispatch table for Haystack kind types
+    encoder = _V4_TYPE_ENCODERS.get(typ)
+    if encoder is not None:
+        return encoder(val)
+
+    # Fallback: subclass and container checks
     if isinstance(val, bool):
         return val
-    if isinstance(val, Marker):
-        return {"_kind": "marker"}
-    if isinstance(val, Na):
-        return {"_kind": "na"}
-    if isinstance(val, Remove):
-        return {"_kind": "remove"}
-    if isinstance(val, Number):
-        return _encode_number_v4(val)
-    if isinstance(val, Ref):
-        d: dict[str, Any] = {"_kind": "ref", "val": val.val}
-        if val.dis is not None:
-            d["dis"] = val.dis
-        return d
-    if isinstance(val, Symbol):
-        return {"_kind": "symbol", "val": val.val}
-    if isinstance(val, Uri):
-        return {"_kind": "uri", "val": val.val}
-    if isinstance(val, Coord):
-        return {"_kind": "coord", "lat": val.lat, "lng": val.lng}
-    if isinstance(val, XStr):
-        return {"_kind": "xstr", "type": val.type_name, "val": val.val}
     if isinstance(val, datetime.datetime):
         return _encode_datetime_v4(val)
     if isinstance(val, datetime.date):
         return {"_kind": "date", "val": val.isoformat()}
     if isinstance(val, datetime.time):
         return {"_kind": "time", "val": val.isoformat()}
-    if isinstance(val, Grid):
-        return _encode_grid_v4(val)
-    if isinstance(val, list):
-        return [_encode_val_v4(v) for v in val]
-    if isinstance(val, dict):
-        return {k: _encode_val_v4(v) for k, v in val.items()}
-    if isinstance(val, str):
-        return val
     if isinstance(val, int | float):
         return val
+    msg = f"Cannot encode {type(val).__name__} as Haystack JSON"
+    raise TypeError(msg)
+
+
+# Pre-built singleton dicts (avoid allocation per call)
+_MARKER_V4: dict[str, str] = {"_kind": "marker"}
+_NA_V4: dict[str, str] = {"_kind": "na"}
+_REMOVE_V4: dict[str, str] = {"_kind": "remove"}
+
+
+def _encode_number_v4_dispatch(val: Any) -> Any:
+    return _encode_number_v4(val)
+
+
+def _encode_ref_v4(val: Any) -> dict[str, Any]:
+    d: dict[str, Any] = {"_kind": "ref", "val": val.val}
+    if val.dis is not None:
+        d["dis"] = val.dis
+    return d
+
+
+def _encode_symbol_v4(val: Any) -> dict[str, str]:
+    return {"_kind": "symbol", "val": val.val}
+
+
+def _encode_uri_v4(val: Any) -> dict[str, str]:
+    return {"_kind": "uri", "val": val.val}
+
+
+def _encode_coord_v4(val: Any) -> dict[str, Any]:
+    return {"_kind": "coord", "lat": val.lat, "lng": val.lng}
+
+
+def _encode_xstr_v4(val: Any) -> dict[str, str]:
+    return {"_kind": "xstr", "type": val.type_name, "val": val.val}
+
+
+def _encode_grid_v4_dispatch(val: Any) -> dict[str, Any]:
+    return _encode_grid_v4(val)
+
+
+def _encode_list_v4(val: Any) -> list[Any]:
+    return [_encode_val_v4(v) for v in val]
+
+
+def _encode_dict_v4(val: Any) -> dict[str, Any]:
+    return {k: _encode_val_v4(v) for k, v in val.items()}
+
+
+# Type → encoder dispatch table (exact type match, no inheritance)
+_V4_TYPE_ENCODERS: dict[type, Any] = {
+    Number: _encode_number_v4_dispatch,
+    Ref: _encode_ref_v4,
+    Symbol: _encode_symbol_v4,
+    Uri: _encode_uri_v4,
+    Coord: _encode_coord_v4,
+    XStr: _encode_xstr_v4,
+    Grid: _encode_grid_v4_dispatch,
+    list: _encode_list_v4,
+    dict: _encode_dict_v4,
+    # datetime types handled in isinstance fallback (subclass ordering matters)
+}
+
+
+def _orjson_default_v4(val: Any) -> Any:
+    """Serialize a Haystack type for orjson's ``default`` hook.
+
+    Called by orjson for any object it cannot natively serialize.
+    Ordered by frequency: Marker (22K) > Ref (10K) > others.
+    """
+    # Singleton: most common non-native type (~22K calls per /read)
+    if val is MARKER:
+        return _MARKER_V4
+
+    typ = type(val)
+
+    # Inline Ref: 2nd most common (~10K calls), avoids dispatch + function call
+    if typ is Ref:
+        d: dict[str, Any] = {"_kind": "ref", "val": val.val}
+        if val.dis is not None:
+            d["dis"] = val.dis
+        return d
+
+    # Rare singletons (moved after Ref for frequency ordering)
+    if val is NA:
+        return _NA_V4
+    if val is REMOVE:
+        return _REMOVE_V4
+
+    # Dispatch table for remaining types
+    encoder = _V4_TYPE_ENCODERS.get(typ)
+    if encoder is not None:
+        return encoder(val)
+
+    if isinstance(val, datetime.datetime):
+        return _encode_datetime_v4(val)
+    if isinstance(val, datetime.date):
+        return {"_kind": "date", "val": val.isoformat()}
+    if isinstance(val, datetime.time):
+        return {"_kind": "time", "val": val.isoformat()}
     msg = f"Cannot encode {type(val).__name__} as Haystack JSON"
     raise TypeError(msg)
 
@@ -239,17 +341,27 @@ def _encode_number_v4(n: Number) -> Any:
     return d
 
 
+# Cache for datetime encoding — few unique datetimes appear many times.
+_DT_CACHE: dict[datetime.datetime, dict[str, Any]] = {}
+_DT_CACHE_MAX = 256
+
+
 def _encode_datetime_v4(dt: datetime.datetime) -> dict[str, Any]:
-    """Encode a datetime for v4."""
+    """Encode a datetime for v4, with caching for repeated values."""
+    cached = _DT_CACHE.get(dt)
+    if cached is not None:
+        return cached
     d: dict[str, Any] = {"_kind": "dateTime", "val": dt.isoformat()}
     tz = tz_name(dt)
     if tz:
         d["tz"] = tz
+    if len(_DT_CACHE) < _DT_CACHE_MAX:
+        _DT_CACHE[dt] = d
     return d
 
 
 def _encode_grid_v4(grid: Grid) -> dict[str, Any]:
-    """Encode a Grid as a v4 JSON dict."""
+    """Encode a Grid as a v4 JSON dict (fully pre-converted)."""
     meta = {k: _encode_val_v4(v) for k, v in grid.meta.items()}
     cols = []
     for c in grid.cols:
@@ -259,6 +371,27 @@ def _encode_grid_v4(grid: Grid) -> dict[str, Any]:
         cols.append(col_d)
     rows = [{k: _encode_val_v4(v) for k, v in row.items()} for row in grid.rows]
     return {"_kind": "grid", "meta": meta, "cols": cols, "rows": rows}
+
+
+def _encode_grid_v4_raw(grid: Grid) -> dict[str, Any]:
+    """Encode a Grid as a v4 dict with raw Haystack values.
+
+    Values are NOT pre-converted — the caller must use ``orjson.dumps``
+    with ``default=_orjson_default_v4`` to serialize them.  This avoids a
+    full pre-walk of the value tree, letting orjson handle native types
+    (str, int, float, bool, None, list, dict) in C and only calling back
+    into Python for Haystack kind objects.
+
+    Row and meta dicts are passed by reference (no copy) since orjson
+    reads them read-only during serialization.
+    """
+    cols = []
+    for c in grid.cols:
+        col_d: dict[str, Any] = {"name": c.name}
+        if c.meta:
+            col_d["meta"] = c.meta
+        cols.append(col_d)
+    return {"_kind": "grid", "meta": grid.meta, "cols": cols, "rows": grid.rows}
 
 
 # ---------------------------------------------------------------------------
@@ -271,21 +404,22 @@ def _decode_val_v4(obj: Any, _depth: int = 0) -> Any:
     if _depth > _MAX_DECODE_DEPTH:
         msg = "Maximum decoding depth exceeded"
         raise ValueError(msg)
-    if obj is None:
-        return None
-    if isinstance(obj, bool):
+    # Fast type dispatch — avoids isinstance chain for common JSON types.
+    t = type(obj)
+    if t is str or t is bool or t is int or t is float or obj is None:
         return obj
-    if isinstance(obj, str):
-        return obj
-    if isinstance(obj, int | float):
-        return obj
-    if isinstance(obj, list):
-        return [_decode_val_v4(v, _depth + 1) for v in obj]
-    if isinstance(obj, dict):
+    if t is dict:
         kind = obj.get("_kind")
         if kind is not None:
-            return _decode_kind_v4(kind, obj, _depth)
+            # Inline _decode_kind_v4 to avoid function call overhead.
+            decoder = _V4_KIND_DECODERS.get(kind)
+            if decoder is not None:
+                return decoder(obj, _depth)
+            msg = f"Unknown _kind: {kind!r}"
+            raise ValueError(msg)
         return {k: _decode_val_v4(v, _depth + 1) for k, v in obj.items()}
+    if t is list:
+        return [_decode_val_v4(v, _depth + 1) for v in obj]
     msg = f"Cannot decode {type(obj).__name__} as Haystack value"
     raise TypeError(msg)
 
@@ -325,7 +459,11 @@ def _decode_number_v4(obj: dict[str, Any], _depth: int = 0) -> Number:
 
 
 def _decode_ref_v4(obj: dict[str, Any], _depth: int = 0) -> Ref:
-    return Ref(obj["val"], obj.get("dis"))
+    # Fast path: bypass __post_init__ validation — data from storage is pre-validated.
+    ref = Ref.__new__(Ref)
+    object.__setattr__(ref, "val", obj["val"])
+    object.__setattr__(ref, "dis", obj.get("dis"))
+    return ref
 
 
 def _decode_symbol_v4(obj: dict[str, Any], _depth: int = 0) -> Symbol:
@@ -352,12 +490,23 @@ def _decode_time_v4(obj: dict[str, Any], _depth: int = 0) -> datetime.time:
     return datetime.time.fromisoformat(obj["val"])
 
 
+_DECODE_DT_CACHE: dict[tuple[str, str | None], datetime.datetime] = {}
+_DECODE_DT_CACHE_MAX = 512
+
+
 def _decode_datetime_v4(obj: dict[str, Any], _depth: int = 0) -> datetime.datetime:
-    dt = datetime.datetime.fromisoformat(obj["val"])
-    tz_name = obj.get("tz")
+    val_str: str = obj["val"]
+    tz_name: str | None = obj.get("tz")
+    key = (val_str, tz_name)
+    cached = _DECODE_DT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    dt = datetime.datetime.fromisoformat(val_str)
     if tz_name:
         tz = city_to_tz(tz_name)
         dt = dt.replace(tzinfo=tz) if dt.tzinfo is None else dt.astimezone(tz)
+    if len(_DECODE_DT_CACHE) < _DECODE_DT_CACHE_MAX:
+        _DECODE_DT_CACHE[key] = dt
     return dt
 
 
@@ -415,31 +564,36 @@ _V3_TYPE_PREFIXES = frozenset("cdhmnrstuxyz-")
 
 
 def _encode_val_v3(val: Any) -> Any:
-    """Encode a value using Haystack 3 JSON format."""
+    """Encode a value using Haystack 3 JSON format.
+
+    Uses fast-path checks for common types and dispatch table for kinds.
+    """
     if val is None:
         return None
+    typ = type(val)
+    if typ is str:
+        return _encode_str_v3(val)
+    if typ is int or typ is float:
+        return _encode_number_v3(Number(float(val)))
+    if typ is bool:
+        return val
+
+    # Singleton identity
+    if val is MARKER:
+        return "m:"
+    if val is NA:
+        return "z:"
+    if val is REMOVE:
+        return "-:"
+
+    # Dispatch table
+    encoder = _V3_TYPE_ENCODERS.get(typ)
+    if encoder is not None:
+        return encoder(val)
+
+    # Fallback: subclass and datetime checks
     if isinstance(val, bool):
         return val
-    if isinstance(val, Marker):
-        return "m:"
-    if isinstance(val, Na):
-        return "z:"
-    if isinstance(val, Remove):
-        return "-:"
-    if isinstance(val, Number):
-        return _encode_number_v3(val)
-    if isinstance(val, Ref):
-        if val.dis is not None:
-            return f"r:{val.val} {val.dis}"
-        return f"r:{val.val}"
-    if isinstance(val, Symbol):
-        return f"y:{val.val}"
-    if isinstance(val, Uri):
-        return f"u:{val.val}"
-    if isinstance(val, Coord):
-        return f"c:{val.lat},{val.lng}"
-    if isinstance(val, XStr):
-        return f"x:{val.type_name}:{val.val}"
     if isinstance(val, datetime.datetime):
         tz = tz_name(val) or "UTC"
         return f"t:{val.isoformat()} {tz}"
@@ -447,14 +601,6 @@ def _encode_val_v3(val: Any) -> Any:
         return f"d:{val.isoformat()}"
     if isinstance(val, datetime.time):
         return f"h:{val.isoformat()}"
-    if isinstance(val, Grid):
-        return _encode_grid_v3(val)
-    if isinstance(val, list):
-        return [_encode_val_v3(v) for v in val]
-    if isinstance(val, dict):
-        return {k: _encode_val_v3(v) for k, v in val.items()}
-    if isinstance(val, str):
-        return _encode_str_v3(val)
     if isinstance(val, int | float):
         return _encode_number_v3(Number(float(val)))
     msg = f"Cannot encode {type(val).__name__} as Haystack JSON"
@@ -492,6 +638,57 @@ def _encode_grid_v3(grid: Grid) -> dict[str, Any]:
         cols.append(col_d)
     rows = [{k: _encode_val_v3(v) for k, v in row.items()} for row in grid.rows]
     return {"meta": meta, "cols": cols, "rows": rows}
+
+
+def _encode_number_v3_dispatch(val: Any) -> str:
+    return _encode_number_v3(val)
+
+
+def _encode_ref_v3(val: Any) -> str:
+    if val.dis is not None:
+        return f"r:{val.val} {val.dis}"
+    return f"r:{val.val}"
+
+
+def _encode_symbol_v3(val: Any) -> str:
+    return f"y:{val.val}"
+
+
+def _encode_uri_v3(val: Any) -> str:
+    return f"u:{val.val}"
+
+
+def _encode_coord_v3(val: Any) -> str:
+    return f"c:{val.lat},{val.lng}"
+
+
+def _encode_xstr_v3(val: Any) -> str:
+    return f"x:{val.type_name}:{val.val}"
+
+
+def _encode_grid_v3_dispatch(val: Any) -> dict[str, Any]:
+    return _encode_grid_v3(val)
+
+
+def _encode_list_v3(val: Any) -> list[Any]:
+    return [_encode_val_v3(v) for v in val]
+
+
+def _encode_dict_v3(val: Any) -> dict[str, Any]:
+    return {k: _encode_val_v3(v) for k, v in val.items()}
+
+
+_V3_TYPE_ENCODERS: dict[type, Any] = {
+    Number: _encode_number_v3_dispatch,
+    Ref: _encode_ref_v3,
+    Symbol: _encode_symbol_v3,
+    Uri: _encode_uri_v3,
+    Coord: _encode_coord_v3,
+    XStr: _encode_xstr_v3,
+    Grid: _encode_grid_v3_dispatch,
+    list: _encode_list_v3,
+    dict: _encode_dict_v3,
+}
 
 
 # ---------------------------------------------------------------------------

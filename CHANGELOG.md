@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-02-24
+
+### Optimized
+
+- **JSON encoder**: Type dispatch table (`_V4_TYPE_ENCODERS`) for O(1) encode lookup; singleton identity checks for Marker/NA/REMOVE; inlined Ref encoding in orjson hook; eliminated unnecessary `dict(row)` copies in grid encoding.
+- **JSON decoder**: Inlined `_decode_kind_v4` into `_decode_val_v4`; type identity checks (`type(obj) is str`) instead of isinstance chains; fast Ref decode via `__new__` + `object.__setattr__` bypassing frozen dataclass `__post_init__`.
+- **DateTime caching**: Encode cache (`_DT_CACHE`) and decode cache (`_DECODE_DT_CACHE`) for datetime values — 31× hit ratio on typical entity datasets.
+- **ZoneInfo caching**: `_tz_cache` in scanner eliminates filesystem I/O on every `ZoneInfo()` call (was 48% of server CPU).
+- **Filter evaluation**: Type dispatch table (`_EVAL_DISPATCH`); single-segment fast paths for Has/Cmp nodes; tag presence index in InMemoryAdapter.
+- **Grid construction**: `_COL_CACHE` for Col objects with no metadata; `Grid._fast_init()` classmethod bypassing dataclass `__init__`/`__post_init__`; `make_rows_with_col_names` skips column inference scan.
+- **Adapter read caches**: Both RedisAdapter and TimescaleAdapter cache decoded read results by `(query, limit)` key (max 64 entries).
+- **`all_col_names` property**: Added to InMemory, Redis, and TimescaleDB adapters — populated at entity load time, enables `Grid.make_rows_with_col_names` fast path.
+- **WebSocket standalone server**: Byte concatenation replaces `encode_grid_dict` → `orjson.dumps(wrapper)` double-serialization; `send_text_preencoded()` skips `str→encode→bytes` roundtrip; response cache for read ops; concurrent batch dispatch via `asyncio.gather`.
+- **WebSocket sans-I/O layer**: `deque` for pending frames (O(1) popleft); `send_text_preencoded(bytes)` method for pre-encoded UTF-8 payloads.
+- **HTTP response caching**: Static responses (`/about`, `/ops`, `/formats`) and read responses cached by `(filter, limit, format)` key.
+
+### Added
+
+- Pure ASGI SCRAM-SHA-256 auth middleware for FastAPI server.
+- Pydantic request/response models for auth endpoints.
+- CORS and HSTS security headers on FastAPI server.
+- Error message sanitization — internal details no longer leaked to clients.
+- Docker benchmark suite with single-client sequential HTTP/WS tests per backend.
+- PyInstrument profiling infrastructure (`bench_profile_server.py`, `bench_profile_client.py`).
+- Binary WebSocket frame codec (`ws_codec.py`) with 4-byte header format.
+
+### Changed
+
+- Benchmark Docker Compose simplified to single client per transport/backend (was 3 clients).
+- Benchmark duration reduced to 15s + 3s warmup (was 30s + 5s).
+- Client container memory limit increased to 1.5 GB (was 768 MB).
+- Updated benchmark documentation with current results: HTTP 3,300–3,700 rps, WS 1,550–1,800 msg/s.
+
 ## [0.1.7] - 2026-02-24
 
 ### Added

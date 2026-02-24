@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from hs_py.filter import evaluate
+from hs_py.filter.ast import Has
 from hs_py.kinds import Number, Ref
 from hs_py.user import User, derive_scram_credentials
 
@@ -54,6 +55,8 @@ class InMemoryAdapter:
     def __init__(self, entities: list[dict[str, Any]] | None = None) -> None:
         # ref_val -> entity dict
         self._entities: dict[str, dict[str, Any]] = {}
+        # tag_name -> set of ref_vals (tag presence index for fast Has queries)
+        self._tag_index: dict[str, set[str]] = {}
         # ref_val -> list of {ts, val} dicts
         self._timeseries: dict[str, list[dict[str, Any]]] = {}
         # ref_val -> {level (1-17) -> val}
@@ -62,6 +65,8 @@ class InMemoryAdapter:
         self._watches: dict[str, _WatchState] = {}
         # username -> User
         self._users: dict[str, User] = {}
+        # Cached column names across all entities (invalidated on load)
+        self._all_col_names: tuple[str, ...] | None = None
 
         if entities:
             self.load_entities(entities)
@@ -86,11 +91,23 @@ class InMemoryAdapter:
         :returns: Number of entities actually stored.
         """
         count = 0
+        tag_index = self._tag_index
         for entity in entities:
             ref = entity.get("id")
             if isinstance(ref, Ref):
-                self._entities[ref.val] = dict(entity)
+                ent = dict(entity)
+                ref_val = ref.val
+                self._entities[ref_val] = ent
+                # Update tag presence index
+                for tag_name in ent:
+                    idx = tag_index.get(tag_name)
+                    if idx is None:
+                        idx = set()
+                        tag_index[tag_name] = idx
+                    idx.add(ref_val)
                 count += 1
+        # Invalidate column cache
+        self._all_col_names = None
         return count
 
     # ---- Internal helpers ----------------------------------------------------
@@ -107,6 +124,18 @@ class InMemoryAdapter:
             return ref_or_str
         return None
 
+    @property
+    def all_col_names(self) -> tuple[str, ...]:
+        """Return all unique tag names across all entities (cached)."""
+        if self._all_col_names is None:
+            seen: dict[str, None] = {}
+            for entity in self._entities.values():
+                for key in entity:
+                    if key not in seen:
+                        seen[key] = None
+            self._all_col_names = tuple(seen)
+        return self._all_col_names
+
     # ---- Read ops ------------------------------------------------------------
 
     async def read_by_filter(
@@ -121,7 +150,26 @@ class InMemoryAdapter:
             limit.
         :returns: List of matching entity dicts.
         """
-        rows: list[dict[str, Any]] = []
+        # Fast path: simple Has("tagName") uses the tag index directly.
+        if type(ast) is Has and len(ast.path.names) == 1:
+            tag = ast.path.names[0]
+            ref_vals = self._tag_index.get(tag)
+            if ref_vals is None:
+                return []
+            entities = self._entities
+            if limit is not None:
+                rows: list[dict[str, Any]] = []
+                for rv in ref_vals:
+                    ent = entities.get(rv)
+                    if ent is not None:
+                        rows.append(ent)
+                        if len(rows) >= limit:
+                            break
+                return rows
+            return [entities[rv] for rv in ref_vals if rv in entities]
+
+        # General path: evaluate filter against every entity.
+        rows = []
         for entity in self._entities.values():
             if evaluate(ast, entity, self._resolver):
                 rows.append(entity)

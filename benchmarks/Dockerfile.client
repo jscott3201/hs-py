@@ -1,0 +1,9 @@
+# Client image — lightweight with only aiohttp for load generation
+FROM python:3.13-alpine
+
+RUN pip install --no-cache-dir aiohttp orjson
+
+WORKDIR /bench
+COPY benchmarks/bench_auth.py benchmarks/bench_http.py benchmarks/bench_ws.py /bench/
+
+ENTRYPOINT ["python"]

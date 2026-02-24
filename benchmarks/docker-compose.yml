@@ -1,0 +1,191 @@
+# Benchmark Docker Compose
+#
+# Single-client heavy workload benchmarks against each storage backend
+# (InMemory, Redis, TimescaleDB) on both HTTP and WebSocket transports.
+#
+# Server: 3 GB RAM limit
+# Client: 1.5 GB RAM limit, 1 client per transport/backend
+# Duration: 15s measurement + 3s warmup
+#
+# Usage:
+#   ./run_benchmarks.sh
+
+x-server-base: &server-base
+  build:
+    context: ..
+    dockerfile: benchmarks/Dockerfile.server
+  deploy:
+    resources:
+      limits:
+        memory: 3g
+  volumes:
+    - ./data:/app/data:ro
+    - ./results:/results
+  environment: &server-env
+    HAYSTACK_USER: admin
+    HAYSTACK_PASS: secret
+    HOST: "0.0.0.0"
+    PORT: "8080"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8080),2); s.close()"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+    start_period: 15s
+
+x-client-base: &client-base
+  build:
+    context: ..
+    dockerfile: benchmarks/Dockerfile.client
+  deploy:
+    resources:
+      limits:
+        memory: 1536m
+  volumes:
+    - ./results:/results
+  environment: &client-env
+    HS_PY_USER: admin
+    HS_PY_PASS: secret
+    HS_PY_CONCURRENCY: "50"
+    HS_PY_DURATION: "15"
+    HS_PY_WARMUP: "3"
+
+x-ws-client-env: &ws-client-env
+  HS_PY_USER: admin
+  HS_PY_PASS: secret
+  HS_PY_CONCURRENCY: "20"
+  HS_PY_DURATION: "15"
+  HS_PY_WARMUP: "3"
+
+services:
+  # ===========================================================================
+  # Infrastructure
+  # ===========================================================================
+  redis:
+    image: redis:8-alpine
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    environment:
+      POSTGRES_DB: haystack
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  # ===========================================================================
+  # Servers — one per backend
+  # ===========================================================================
+  server-inmemory:
+    <<: *server-base
+    environment:
+      <<: *server-env
+      BACKEND: inmemory
+
+  server-redis:
+    <<: *server-base
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *server-env
+      BACKEND: redis
+      REDIS_URL: redis://redis:6379
+
+  server-timescale:
+    <<: *server-base
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      <<: *server-env
+      BACKEND: timescale
+      TIMESCALE_DSN: postgresql://postgres:test@timescaledb:5432/haystack
+
+  # ===========================================================================
+  # HTTP Clients — 1 per backend
+  # ===========================================================================
+  http-inmemory:
+    <<: *client-base
+    depends_on:
+      server-inmemory:
+        condition: service_healthy
+    environment:
+      <<: *client-env
+      HS_PY_SERVER_URL: http://server-inmemory:8080/api
+      HS_PY_RESULTS_FILE: /results/http_inmemory.json
+    command: ["bench_http.py"]
+
+  http-redis:
+    <<: *client-base
+    depends_on:
+      server-redis:
+        condition: service_healthy
+    environment:
+      <<: *client-env
+      HS_PY_SERVER_URL: http://server-redis:8080/api
+      HS_PY_RESULTS_FILE: /results/http_redis.json
+    command: ["bench_http.py"]
+
+  http-timescale:
+    <<: *client-base
+    depends_on:
+      server-timescale:
+        condition: service_healthy
+    environment:
+      <<: *client-env
+      HS_PY_SERVER_URL: http://server-timescale:8080/api
+      HS_PY_RESULTS_FILE: /results/http_timescale.json
+    command: ["bench_http.py"]
+
+  # ===========================================================================
+  # WebSocket Clients — 1 per backend
+  # ===========================================================================
+  ws-inmemory:
+    <<: *client-base
+    depends_on:
+      server-inmemory:
+        condition: service_healthy
+    environment:
+      <<: *ws-client-env
+      HS_PY_SERVER_URL: http://server-inmemory:8080/api
+      HS_PY_RESULTS_FILE: /results/ws_inmemory.json
+    command: ["bench_ws.py"]
+
+  ws-redis:
+    <<: *client-base
+    depends_on:
+      server-redis:
+        condition: service_healthy
+    environment:
+      <<: *ws-client-env
+      HS_PY_SERVER_URL: http://server-redis:8080/api
+      HS_PY_RESULTS_FILE: /results/ws_redis.json
+    command: ["bench_ws.py"]
+
+  ws-timescale:
+    <<: *client-base
+    depends_on:
+      server-timescale:
+        condition: service_healthy
+    environment:
+      <<: *ws-client-env
+      HS_PY_SERVER_URL: http://server-timescale:8080/api
+      HS_PY_RESULTS_FILE: /results/ws_timescale.json
+    command: ["bench_ws.py"]
