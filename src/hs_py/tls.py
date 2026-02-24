@@ -278,7 +278,7 @@ def _write_cert(path: Path, cert: x509.Certificate) -> None:
 
 
 def _write_key(path: Path, key: ec.EllipticCurvePrivateKey) -> None:
-    """Write a private key as PEM (unencrypted)."""
+    """Write a private key as PEM (unencrypted) with restrictive permissions."""
     path.write_bytes(
         key.private_bytes(
             serialization.Encoding.PEM,
@@ -286,6 +286,7 @@ def _write_key(path: Path, key: ec.EllipticCurvePrivateKey) -> None:
             serialization.NoEncryption(),
         )
     )
+    path.chmod(0o600)
 
 
 def _resolve_password(password: bytes | str | None) -> bytes | None:

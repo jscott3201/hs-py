@@ -119,15 +119,16 @@ See :doc:`watch-guide` for delta encoding and the
    from hs_py.kinds import Ref
 
    async with WebSocketClient("ws://host/api/ws", auth_token="token") as ws:
+       # Use raw=True to access grid metadata (e.g. watchId)
        watch = await ws.watch_sub(
-           [Ref("p1"), Ref("p2")], watch_dis="My Watch",
+           [Ref("p1"), Ref("p2")], watch_dis="My Watch", raw=True,
        )
        watch_id = watch.meta["watchId"]
 
        # Subscribe with a server-side filter
        watch = await ws.watch_sub(
            [Ref("p1"), Ref("p2")], watch_dis="Filtered",
-           filter="curVal > 70",
+           filter="curVal > 70", raw=True,
        )
 
        # Poll for changes

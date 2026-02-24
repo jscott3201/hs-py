@@ -29,28 +29,35 @@ Choose the backend that matches your deployment needs:
 Memory Backend
 --------------
 
-:class:`~hs_py.storage.memory.MemoryAdapter` stores entities and history
+:class:`~hs_py.storage.memory.InMemoryAdapter` stores entities and history
 in-memory. Useful for unit tests and rapid prototyping. All data is lost when
 the process exits.
 
 .. code-block:: python
 
-   from hs_py.storage.memory import MemoryAdapter
+   from hs_py.storage.memory import InMemoryAdapter
+   from hs_py.kinds import Ref, MARKER
 
-   storage = MemoryAdapter()
+   # Option 1: Pass entities at construction time
+   storage = InMemoryAdapter(entities=[
+       {"id": Ref("site-1"), "dis": "HQ", "site": MARKER},
+   ])
 
-   # Pre-load entities
-   storage.entities["site-1"] = {"id": Ref("site-1"), "dis": "HQ", "site": MARKER}
+   # Option 2: Bulk-load after construction
+   storage = InMemoryAdapter()
+   storage.load_entities([
+       {"id": Ref("site-1"), "dis": "HQ", "site": MARKER},
+   ])
 
 No configuration is required. Pass the adapter to
-:func:`~hs_py.fastapi_server.create_app`:
+:func:`~hs_py.fastapi_server.create_fastapi_app`:
 
 .. code-block:: python
 
-   from hs_py.fastapi_server import create_app
-   from hs_py.storage.memory import MemoryAdapter
+   from hs_py.fastapi_server import create_fastapi_app
+   from hs_py.storage.memory import InMemoryAdapter
 
-   app = create_app(storage=MemoryAdapter())
+   app = create_fastapi_app(storage=InMemoryAdapter())
 
 
 Redis Backend

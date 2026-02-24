@@ -87,6 +87,7 @@ WRITE_OPS: frozenset[str] = frozenset(
         "watchSub",
         "watchUnsub",
         "watchPoll",
+        "close",
     }
 )
 

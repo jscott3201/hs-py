@@ -198,7 +198,7 @@ def _build_ft_query(node: Node) -> str | None:
 
 
 # Characters that need escaping in RediSearch TAG values
-_FT_SPECIAL = frozenset(r",.<>{}[]\"':;!@#$%^&*()-+=~ ")
+_FT_SPECIAL = frozenset(r",.<>{}[]\"':;!@#$%^&*()-+=~ |/?`")
 
 
 def _ft_escape(tag: str) -> str:

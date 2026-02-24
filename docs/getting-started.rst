@@ -22,11 +22,10 @@ Optional extras for server and storage backends:
 
    pip install haystack-py[server]       # FastAPI + Redis backend
    pip install haystack-py[timescale]    # TimescaleDB/PostgreSQL backend
-   pip install haystack-py[rdf]          # RDF ontology import (rdflib)
    pip install haystack-py[all]          # All optional dependencies
 
 Requirements: Python 3.13+. Core dependencies (aiohttp, orjson, cryptography,
-websockets) are installed automatically.
+websockets, rdflib) are installed automatically.
 
 Development Setup
 -----------------
@@ -138,13 +137,16 @@ The :class:`~hs_py.client.Client` constructor accepts configuration options:
 
 .. code-block:: python
 
+   import aiohttp
    from hs_py import Client
+
+   timeout = aiohttp.ClientTimeout(total=30)
 
    async with Client(
        "http://server/api",
        username="admin",
        password="secret",
-       timeout=30.0,        # per-request timeout in seconds
+       timeout=timeout,
    ) as c:
        ...
 

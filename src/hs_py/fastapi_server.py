@@ -54,6 +54,15 @@ _POST_OPS = tuple(_POST_OP_METHODS.keys())
 # Maximum request body size (16 MiB)
 _MAX_BODY_SIZE = 16 * 1024 * 1024
 
+# Maximum entries in response/grid caches.
+_MAX_CACHE_SIZE = 2048
+
+# Maximum number of items in a WebSocket batch request.
+_MAX_BATCH_SIZE = 1000
+
+# Ops that mutate state and should invalidate read caches.
+_MUTATION_OPS = frozenset({"hisWrite", "pointWrite", "invokeAction"})
+
 _401_HEADERS = {"WWW-Authenticate": "SCRAM hash=SHA-256"}
 
 
@@ -194,7 +203,8 @@ def _cached_grid_response(grid: Grid, request: Request, cache_key: str) -> Respo
     if cached is not None:
         return Response(content=cached[0], media_type=cached[1])
     body, ct = encode_response(grid, fmt)
-    cache[key] = (body, ct)
+    if len(cache) < _MAX_CACHE_SIZE:
+        cache[key] = (body, ct)
     return Response(content=body, media_type=ct)
 
 
@@ -216,6 +226,9 @@ def _ws_cached_grid_bytes(
 ) -> bytes:
     """Return cached grid bytes for read ops, encode otherwise."""
     cache: dict[str, bytes] = app.state._ws_grid_cache
+    # Invalidate cache on mutation ops
+    if op in _MUTATION_OPS and cache:
+        cache.clear()
     if op == "read":
         grid_data = msg.get("grid")
         if isinstance(grid_data, dict):
@@ -228,7 +241,8 @@ def _ws_cached_grid_bytes(
                 if cached is not None:
                     return cached
                 grid_bytes = _ws_encode_grid(grid)
-                cache[key] = grid_bytes
+                if len(cache) < _MAX_CACHE_SIZE:
+                    cache[key] = grid_bytes
                 return grid_bytes
     return _ws_encode_grid(grid)
 
@@ -338,6 +352,7 @@ def _make_get_handler(op_name: str) -> Any:
             grid = await ops.formats()
             return _cached_grid_response(grid, request, "formats")
         elif op_name == "close":
+            await _check_op_permission(request, "close")
             await ops.on_close()
             grid = Grid.make_empty()
         else:
@@ -362,6 +377,14 @@ def _make_post_handler(op_name: str, method_name: str) -> Any:
         req_grid = await _parse_grid(request)
         method = getattr(ops, method_name)
         result_grid: Grid = await method(req_grid)
+        # Invalidate read caches on mutation ops
+        if op_name in _MUTATION_OPS:
+            cache: dict[Any, Any] | None = getattr(request.app.state, "_response_cache", None)
+            if cache:
+                cache.clear()
+            ws_cache: dict[str, bytes] | None = getattr(request.app.state, "_ws_grid_cache", None)
+            if ws_cache:
+                ws_cache.clear()
         return _grid_response(result_grid, request)
 
     handler.__name__ = f"{op_name}_post_handler"
@@ -453,6 +476,9 @@ async def _handle_ws_batch(
     items = [item for item in batch if isinstance(item, dict)]
     if not items:
         return
+    # Cap batch size to prevent resource exhaustion
+    if len(items) > _MAX_BATCH_SIZE:
+        items = items[:_MAX_BATCH_SIZE]
 
     async def _dispatch_item(item: dict[str, Any]) -> bytes:
         r_id = item.get("id")

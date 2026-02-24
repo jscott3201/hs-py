@@ -22,6 +22,9 @@ if TYPE_CHECKING:
 
 __all__ = ["InMemoryAdapter"]
 
+# Maximum number of history items per point (prevents unbounded memory growth).
+_MAX_HISTORY_PER_POINT = 100_000
+
 
 # ---------------------------------------------------------------------------
 # Internal watch state
@@ -254,6 +257,9 @@ class InMemoryAdapter:
         """
         bucket = self._timeseries.setdefault(ref.val, [])
         bucket.extend(items)
+        # Cap per-point history to prevent unbounded memory growth
+        if len(bucket) > _MAX_HISTORY_PER_POINT:
+            del bucket[: len(bucket) - _MAX_HISTORY_PER_POINT]
 
     # ---- Priority array ops --------------------------------------------------
 

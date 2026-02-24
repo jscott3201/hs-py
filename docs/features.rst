@@ -216,7 +216,7 @@ Type Safety
 Quality
 -------
 
-- **1,200+ unit tests** with ``pytest``
+- **1,600+ unit tests** with ``pytest``
 - **69 end-to-end integration tests** against Docker (Redis + FastAPI server)
 - **122 TimescaleDB integration tests** against Docker
 - **100% coverage** on security and authentication modules

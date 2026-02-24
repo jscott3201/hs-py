@@ -270,8 +270,8 @@ Or from Docker:
          - "8080:8080"
        environment:
          REDIS_URL: redis://redis:6379
-         HAYSTACK_USER: admin
-         HAYSTACK_PASS: secret
+         HS_SUPERUSER_USERNAME: admin
+         HS_SUPERUSER_PASSWORD: secret
        depends_on:
          redis:
            condition: service_healthy

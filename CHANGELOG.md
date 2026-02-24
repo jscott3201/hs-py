@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-02-24
+
+### Security
+
+- **SCRAM nonce verification**: Server-side `scram_step2` now verifies the client nonce prefix and channel-binding data, preventing replay and MitM attacks.
+- **SCRAM empty nonce rejection**: `scram_step1` rejects empty client nonces.
+- **Mandatory server signature**: Client SCRAM auth raises `AuthError` if the server omits the signature proof (`v=`), preventing authentication bypass.
+- **Minimum SCRAM iterations**: Client enforces a floor of 4,096 PBKDF2 iterations to resist brute-force attacks.
+- **SCRAM iterations error handling**: Non-integer iteration count in server response now raises `AuthError` instead of crashing.
+- **WebSocket role enforcement**: Standalone WS server now tracks authenticated username and checks role permissions before dispatching ops; write ops require Operator or Admin role.
+- **WebSocket max message size**: Standalone WS server enforces a 10 MB message size limit on `accept()`.
+- **WebSocket batch size limit**: Both WS and FastAPI servers cap batch requests to 1,000 items.
+- **Filter parser recursion limit**: Recursive descent parser enforces a maximum nesting depth of 50 to prevent stack overflow.
+- **Ref decoder validation**: `_decode_ref_v4` fast path now validates the ref value against the Haystack identifier regex before bypassing `__post_init__`.
+- **Nested grid depth threading**: Zinc `decode_grid` → `_parse_row_line` → `scan_val` now threads `_depth` to enforce the existing `MAX_SCAN_DEPTH` limit on nested grids.
+- **Bounded response caches**: HTTP and WS response caches capped at 2,048 entries to prevent unbounded memory growth.
+- **Cache invalidation on writes**: Mutation ops (`hisWrite`, `pointWrite`, `invokeAction`) now clear both HTTP and WS response caches.
+- **History write limits**: `InMemoryAdapter.his_write` caps per-point history at 100,000 items, trimming oldest entries on overflow.
+- **`pointWrite` level validation**: Rejects levels outside 1–17 with an error grid.
+- **`close` op permission**: HTTP `close` endpoint now requires Operator or Admin role.
+- **Bounded list/dict scanning**: Zinc scanner limits list and dict elements to 100,000 to prevent memory exhaustion.
+- **Zinc grid decode limits**: `decode_grid` enforces max 200,000 rows and 10,000 columns.
+- **RediSearch escape hardening**: Added `|`, `/`, `?`, and `` ` `` to the escaped character set in `_ft_escape`.
+- **Unicode escape validation**: Zinc scanner and filter lexer now reject incomplete `\u` sequences and surrogate codepoints (U+D800–U+DFFF).
+- **Private key file permissions**: TLS key files are written with `0o600` mode.
+- **WebSocket finally-block safety**: `remote` variable initialized before the try block to prevent `NameError` on early connection failure.
+
+### Fixed
+
+- **Documentation**: Corrected `MemoryAdapter` → `InMemoryAdapter`, `create_app` → `create_fastapi_app`, fixed return type annotations in client guide, added `raw=True` to watch/WebSocket examples, corrected TLS 1.2 → 1.3, fixed Docker env var names, removed stale `[rdf]` extra reference, updated test count.
+
 ## [0.1.8] - 2026-02-24
 
 ### Optimized

@@ -83,7 +83,7 @@ from a ``TLSConfig``:
        ca_certificates_path="ca.crt",
    )
    ctx = build_client_ssl_context(tls)
-   # ctx is an ssl.SSLContext configured for TLS 1.2+ with the given certs
+   # ctx is an ssl.SSLContext configured for TLS 1.3 with the given certs
 
 .. _guide-tls-server:
 
@@ -136,8 +136,8 @@ Combine ``TLSConfig`` with :class:`~hs_py.auth_types.CertAuthenticator`:
    )
    ctx = build_server_ssl_context(tls)
 
-   app = create_app(MyOps(), authenticator=auth)
-   # Run with: web.run_app(app, ssl_context=ctx, port=8443)
+   app = create_fastapi_app(ops=MyOps(), authenticator=auth)
+   # Run with uvicorn: uvicorn myapp:app --ssl-certfile=server.crt --ssl-keyfile=server.key --port 8443
 
 Peer Certificate Inspection
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

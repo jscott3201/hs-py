@@ -144,7 +144,9 @@ All cryptographic operations use the ``cryptography`` library (not stdlib
 Standard Operations
 -------------------
 
-All operations return a :class:`~hs_py.grid.Grid`.  The client raises
+By default (``pythonic=True``), operations return ``list[dict[str, Any]]`` with
+Haystack values converted to plain Python types.  Pass ``raw=True`` to any
+operation to get the raw :class:`~hs_py.grid.Grid` instead.  The client raises
 :class:`~hs_py.errors.CallError` if the server returns an error grid.
 
 About
@@ -292,11 +294,12 @@ delta encoding and the full watch lifecycle.
 
 .. code-block:: python
 
-   # Subscribe — creates or updates a watch
+   # Subscribe — creates or updates a watch (raw=True to access grid metadata)
    watch = await c.watch_sub(
        [Ref("p:demo:r:1"), Ref("p:demo:r:2")],
        watch_dis="My Watch",
        lease=Number(5, "min"),  # Optional lease duration
+       raw=True,
    )
    watch_id = watch.meta.get("watchId")
 

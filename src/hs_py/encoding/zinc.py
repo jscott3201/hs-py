@@ -44,6 +44,10 @@ __all__ = [
 
 _ZINC_VER = "3.0"
 
+# Maximum grid dimensions when decoding Zinc (matches JSON decoder limits).
+_MAX_GRID_ROWS = 200_000
+_MAX_GRID_COLS = 10_000
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -109,7 +113,7 @@ def encode_grid(grid: Grid) -> str:
     return "\n".join(lines)
 
 
-def decode_grid(text: str) -> Grid:
+def decode_grid(text: str, *, _depth: int = 0) -> Grid:
     """Decode Zinc text into a Grid.
 
     :param text: Zinc grid text.
@@ -127,15 +131,22 @@ def decode_grid(text: str) -> Grid:
 
     # Parse columns
     cols = _parse_cols_line(lines[1])
+    if len(cols) > _MAX_GRID_COLS:
+        msg = f"Grid exceeds maximum column count of {_MAX_GRID_COLS}"
+        raise ValueError(msg)
 
     # Check for empty grid marker
     if len(cols) == 1 and cols[0].name == "empty" and not cols[0].meta:
         return Grid(meta=meta)
 
     # Parse rows
+    data_lines = lines[2:]
+    if len(data_lines) > _MAX_GRID_ROWS:
+        msg = f"Grid exceeds maximum row count of {_MAX_GRID_ROWS}"
+        raise ValueError(msg)
     rows: list[dict[str, Any]] = []
-    for line in lines[2:]:
-        row = _parse_row_line(line, cols)
+    for line in data_lines:
+        row = _parse_row_line(line, cols, _depth=_depth)
         rows.append(row)
 
     return Grid(meta=meta, cols=tuple(cols), rows=tuple(rows))
@@ -304,7 +315,7 @@ def _parse_cols_line(line: str) -> list[Col]:
     return cols
 
 
-def _parse_row_line(line: str, cols: list[Col]) -> dict[str, Any]:
+def _parse_row_line(line: str, cols: list[Col], *, _depth: int = 0) -> dict[str, Any]:
     """Parse a data row line into a dict keyed by column names."""
     row: dict[str, Any] = {}
     pos = 0
@@ -322,7 +333,7 @@ def _parse_row_line(line: str, cols: list[Col]) -> dict[str, Any]:
             continue
 
         # Parse value
-        val, pos = scan_val(line, pos)
+        val, pos = scan_val(line, pos, _depth=_depth)
         if val is not None:
             row[col.name] = val
 

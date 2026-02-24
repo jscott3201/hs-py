@@ -217,10 +217,11 @@ Complete watch lifecycle using the HTTP client:
    from hs_py import Client
 
    async with Client("http://host/api", "user", "pass") as c:
-       # 1. Subscribe to entities
+       # 1. Subscribe to entities (raw=True to access grid metadata)
        watch = await c.watch_sub(
            [Ref("p:demo:r:1"), Ref("p:demo:r:2")],
            watch_dis="My Watch",
+           raw=True,
        )
        watch_id = watch.meta["watchId"]
 
@@ -252,7 +253,7 @@ With WebSocket, watch updates can be polled or handled via application logic:
 
    async with WebSocketClient("ws://host/api/ws", auth_token="token") as ws:
        watch = await ws.watch_sub(
-           [Ref("p1"), Ref("p2")], watch_dis="WS Watch",
+           [Ref("p1"), Ref("p2")], watch_dis="WS Watch", raw=True,
        )
        watch_id = watch.meta["watchId"]
 

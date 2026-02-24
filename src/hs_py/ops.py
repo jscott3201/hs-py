@@ -202,6 +202,8 @@ class HaystackOps:
         if "level" in first:
             level_val = first["level"]
             level = int(level_val.val) if isinstance(level_val, Number) else int(level_val)
+            if not 1 <= level <= 17:
+                return Grid.make_error("pointWrite level must be 1-17")
             val = first.get("val")
             who = str(first.get("who", ""))
             duration = first.get("duration")

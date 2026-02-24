@@ -167,9 +167,11 @@ def scram_step1(
     else:
         client_first_bare = client_first_msg
 
-    # Extract client nonce
+    # Extract client nonce — reject empty nonces (RFC 5802 requires client nonce)
     parts = dict(p.split("=", 1) for p in client_first_bare.split(",") if "=" in p)
     c_nonce = parts.get("r", "")
+    if not c_nonce:
+        return ScramResult(status=401, headers=dict(_401_HEADERS))
 
     # Generate combined nonce
     s_nonce = c_nonce + secrets.token_urlsafe(24)
@@ -216,6 +218,15 @@ def scram_step2(
 
     if not proof_b64:
         return ScramResult(status=401, headers=dict(_401_HEADERS))
+
+    # RFC 5802 §5: verify nonce matches the combined nonce from step 1
+    if parts.get("r") != state.server_nonce:
+        return ScramResult(status=403, headers={}, body="Authentication failed")
+
+    # RFC 5802: verify channel binding matches expected value
+    expected_cb = _b64url_encode(b"n,,")
+    if parts.get("c") != expected_cb:
+        return ScramResult(status=403, headers={}, body="Authentication failed")
 
     # Verify client proof — guard against length mismatches
     try:

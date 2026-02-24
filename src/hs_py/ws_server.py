@@ -54,6 +54,18 @@ _log = logging.getLogger(__name__)
 # Maximum concurrent connections to prevent resource exhaustion.
 _MAX_CONNECTIONS = 1000
 
+# Maximum WebSocket message size (10 MB) to prevent memory exhaustion.
+_MAX_WS_MESSAGE_SIZE = 10 * 1024 * 1024
+
+# Maximum number of items in a batch request.
+_MAX_BATCH_SIZE = 1000
+
+# Maximum entries in the response cache.
+_MAX_CACHE_SIZE = 2048
+
+# Ops that mutate state and should invalidate read caches.
+_MUTATION_OPS = frozenset({"hisWrite", "pointWrite", "invokeAction"})
+
 
 def _ws_envelope(grid_bytes: bytes, req_id: Any = None, ch: Any = None) -> bytes:
     """Build a JSON envelope around pre-encoded grid bytes."""
@@ -94,6 +106,7 @@ class WebSocketServer:
         cert_auth: CertAuthenticator | None = None,
         compression: bool = False,
         binary: bool = False,
+        user_store: Any = None,
     ) -> None:
         """Initialise the WebSocket server.
 
@@ -111,6 +124,7 @@ class WebSocketServer:
         :param cert_auth: Optional :class:`~hs_py.server.CertAuthenticator` for mTLS.
         :param compression: Enable per-message deflate compression.
         :param binary: Use binary frame encoding instead of JSON envelopes.
+        :param user_store: Optional user store for role-based authorization checks.
         """
         self._ops = ops
         self._auth_token = auth_token
@@ -123,6 +137,7 @@ class WebSocketServer:
         self._heartbeat = heartbeat
         self._metrics = metrics or MetricsHooks()
         self._compression = compression
+        self._user_store = user_store
         self._server: asyncio.Server | None = None
         self._connections: weakref.WeakSet[HaystackWebSocket] = weakref.WeakSet()
         self._connection_count = 0
@@ -194,6 +209,9 @@ class WebSocketServer:
         grid: Grid,
     ) -> bytes:
         """Return cached grid bytes for read ops, encode otherwise."""
+        # Invalidate cache on mutation ops
+        if op in _MUTATION_OPS and self._ws_grid_cache:
+            self._ws_grid_cache.clear()
         if op == "read":
             grid_data = msg.get("grid")
             if isinstance(grid_data, dict):
@@ -206,7 +224,8 @@ class WebSocketServer:
                     if cached is not None:
                         return cached
                     grid_bytes = encode_grid_json(grid)
-                    self._ws_grid_cache[key] = grid_bytes
+                    if len(self._ws_grid_cache) < _MAX_CACHE_SIZE:
+                        self._ws_grid_cache[key] = grid_bytes
                     return grid_bytes
         return encode_grid_json(grid)
 
@@ -224,21 +243,26 @@ class WebSocketServer:
         self._connection_count += 1
         ws: HaystackWebSocket | None = None
         hb_task: asyncio.Task[None] | None = None
+        remote: str = "?"
         try:
-            ws = await HaystackWebSocket.accept(reader, writer, compression=self._compression)
+            ws = await HaystackWebSocket.accept(
+                reader, writer, compression=self._compression, max_size=_MAX_WS_MESSAGE_SIZE
+            )
             self._connections.add(ws)
             remote = writer.get_extra_info("peername", ("?",))[0]
             _fire(self._metrics.on_ws_connect, str(remote))
 
             # Authenticate: cert-based first, then SCRAM, then token-based
+            ws_username: str | None = None
             if self._cert_auth is not None:
                 peercert = writer.get_extra_info("peercert")
                 username = self._cert_auth.authorize(peercert)
                 if username is not None:
                     _log.debug("Client authenticated via certificate CN=%s", username)
+                    ws_username = username
                 elif self._authenticator is not None:
-                    authenticated = await self._scram_authenticate(ws)
-                    if not authenticated:
+                    ws_username = await self._scram_authenticate(ws)
+                    if ws_username is None:
                         return
                 elif self._auth_token:
                     authenticated = await self._token_authenticate(ws)
@@ -248,8 +272,8 @@ class WebSocketServer:
                     _log.warning("Client certificate not authorized")
                     return
             elif self._authenticator is not None:
-                authenticated = await self._scram_authenticate(ws)
-                if not authenticated:
+                ws_username = await self._scram_authenticate(ws)
+                if ws_username is None:
                     return
             elif self._auth_token:
                 authenticated = await self._token_authenticate(ws)
@@ -261,7 +285,7 @@ class WebSocketServer:
                 hb_task = asyncio.create_task(
                     heartbeat_loop(ws, self._heartbeat), name="hs-ws-srv-heartbeat"
                 )
-            await self._message_loop(ws)
+            await self._message_loop(ws, ws_username)
         except (ConnectionClosedOK, ConnectionClosedError):
             pass
         except (TimeoutError, ConnectionError, OSError):
@@ -292,7 +316,7 @@ class WebSocketServer:
             _log.warning("WebSocket token auth error")
             return False
 
-    async def _scram_authenticate(self, ws: HaystackWebSocket) -> bool:
+    async def _scram_authenticate(self, ws: HaystackWebSocket) -> str | None:
         """Perform SCRAM-SHA-256 handshake over WebSocket messages.
 
         Message flow::
@@ -304,7 +328,7 @@ class WebSocketServer:
             Client → {"type":"scram","handshakeToken":"...","data":"<b64>"}
             Server → {"type":"authOk","authToken":"...","data":"<b64>"}
 
-        Returns ``True`` on successful authentication.
+        Returns the authenticated username on success, or ``None`` on failure.
         """
         assert self._authenticator is not None
         try:
@@ -317,15 +341,15 @@ class WebSocketServer:
                 if "authToken" in msg:
                     token = msg["authToken"]
                     if self._auth_token and hmac_mod.compare_digest(token, self._auth_token):
-                        return True
+                        return ""  # token auth has no username
                     _log.warning("WebSocket token auth failed (SCRAM mode)")
                     await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                    return False
+                    return None
 
                 if msg.get("type") != "hello":
                     _log.warning("Expected hello message, got: %s", msg.get("type"))
                     await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                    return False
+                    return None
 
                 auth_header = f"HELLO username={msg.get('username', '')}"
                 result = await scram_hello(self._authenticator, self._handshakes, auth_header)
@@ -333,7 +357,7 @@ class WebSocketServer:
                     "WWW-Authenticate", ""
                 ):
                     await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                    return False
+                    return None
 
                 from hs_py.auth import _parse_header_params
 
@@ -353,7 +377,7 @@ class WebSocketServer:
                 msg = orjson.loads(data)
                 if msg.get("type") != "scram":
                     await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                    return False
+                    return None
 
                 ht = msg.get("handshakeToken", "")
                 scram_data = msg.get("data", "")
@@ -375,14 +399,14 @@ class WebSocketServer:
                     )
                 else:
                     await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                    return False
+                    return None
 
                 # Step 3: client-final → server-final + authToken
                 data = await ws.recv()
                 msg = orjson.loads(data)
                 if msg.get("type") != "scram":
                     await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                    return False
+                    return None
 
                 ht = msg.get("handshakeToken", "")
                 scram_data = msg.get("data", "")
@@ -392,26 +416,51 @@ class WebSocketServer:
                 if result.status == 200:
                     auth_info = result.headers.get("Authentication-Info", "")
                     resp_params = _parse_header_params(auth_info)
+                    auth_token = resp_params.get("authToken", "")
                     await ws.send_text(
                         orjson.dumps(
                             {
                                 "type": "authOk",
-                                "authToken": resp_params.get("authToken", ""),
+                                "authToken": auth_token,
                                 "data": resp_params.get("data", ""),
                             }
                         ).decode()
                     )
                     _log.debug("WebSocket SCRAM auth succeeded")
-                    return True
+                    # Look up username from the issued token
+                    token_entry = self._tokens.get(auth_token)
+                    return token_entry.username if token_entry else ""
 
                 await ws.send_text(orjson.dumps({"type": "authErr"}).decode())
-                return False
+                return None
 
         except Exception:
             _log.warning("WebSocket SCRAM auth error")
-            return False
+            return None
 
-    async def _message_loop(self, ws: HaystackWebSocket) -> None:
+    async def _check_permission(self, username: str | None, op_name: str) -> None:
+        """Check role permissions for a WebSocket op.
+
+        :raises HaystackError: If the user lacks the required role.
+        """
+        if self._user_store is None:
+            return
+
+        from hs_py.user import WRITE_OPS, Role
+
+        if username is None:
+            raise HaystackError("Authentication required")
+
+        user = await self._user_store.get_user(username)
+        if user is None or not user.enabled:
+            raise HaystackError("Authentication required")
+
+        if op_name in WRITE_OPS and user.role < Role.OPERATOR:
+            raise HaystackError(
+                f"Insufficient permissions: {op_name} requires operator or admin role"
+            )
+
+    async def _message_loop(self, ws: HaystackWebSocket, username: str | None = None) -> None:
         """Read request messages and dispatch to HaystackOps."""
         while True:
             data = await ws.recv()
@@ -419,7 +468,7 @@ class WebSocketServer:
 
             # Binary frame handling
             if self._binary and isinstance(data, bytes) and len(data) >= 4:
-                await self._handle_binary_message(ws, data)
+                await self._handle_binary_message(ws, data, username)
                 continue
 
             # JSON text handling
@@ -431,12 +480,14 @@ class WebSocketServer:
 
             # Batch: JSON array of envelopes
             if isinstance(msg, list):
-                await self._handle_batch(ws, msg)
+                await self._handle_batch(ws, msg, username)
                 continue
 
-            await self._handle_json_message(ws, msg)
+            await self._handle_json_message(ws, msg, username)
 
-    async def _handle_json_message(self, ws: HaystackWebSocket, msg: dict[str, Any]) -> None:
+    async def _handle_json_message(
+        self, ws: HaystackWebSocket, msg: dict[str, Any], username: str | None = None
+    ) -> None:
         """Dispatch a single JSON request envelope."""
         req_id = msg.get("id")
         op = msg.get("op", "")
@@ -444,6 +495,7 @@ class WebSocketServer:
         _fire(self._metrics.on_ws_message_recv, op, 0)
 
         try:
+            await self._check_permission(username, op)
             result_grid = await dispatch_op(self._ops, op, msg)
         except HaystackError as exc:
             _fire(self._metrics.on_error, op, type(exc).__name__)
@@ -458,7 +510,9 @@ class WebSocketServer:
         await ws.send_text_preencoded(payload)
         _fire(self._metrics.on_ws_message_sent, op, len(payload))
 
-    async def _handle_binary_message(self, ws: HaystackWebSocket, data: bytes) -> None:
+    async def _handle_binary_message(
+        self, ws: HaystackWebSocket, data: bytes, username: str | None = None
+    ) -> None:
         """Dispatch a binary frame request."""
         try:
             flags, req_id, op, grid_bytes = decode_binary_frame(data)
@@ -475,6 +529,7 @@ class WebSocketServer:
             msg: dict[str, Any] = {"op": op}
             if grid_bytes:
                 msg["grid"] = orjson.loads(grid_bytes)
+            await self._check_permission(username, op)
             result_grid = await dispatch_op(self._ops, op, msg)
         except HaystackError as exc:
             _fire(self._metrics.on_error, op, type(exc).__name__)
@@ -488,16 +543,22 @@ class WebSocketServer:
         await ws.send_bytes(response)
         _fire(self._metrics.on_ws_message_sent, op, len(response))
 
-    async def _handle_batch(self, ws: HaystackWebSocket, batch: list[Any]) -> None:
+    async def _handle_batch(
+        self, ws: HaystackWebSocket, batch: list[Any], username: str | None = None
+    ) -> None:
         """Dispatch a batch of JSON request envelopes concurrently."""
         items = [item for item in batch if isinstance(item, dict)]
         if not items:
             return
+        # Cap batch size to prevent resource exhaustion
+        if len(items) > _MAX_BATCH_SIZE:
+            items = items[:_MAX_BATCH_SIZE]
 
         async def _dispatch_item(item: dict[str, Any]) -> bytes:
             r_id = item.get("id")
             r_op = item.get("op", "")
             try:
+                await self._check_permission(username, r_op)
                 r_grid = await dispatch_op(self._ops, r_op, item)
             except HaystackError as exc:
                 r_grid = Grid.make_error(str(exc))

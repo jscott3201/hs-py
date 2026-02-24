@@ -182,9 +182,16 @@ class Lexer:
                 if self._pos >= self._len:
                     raise ValueError(f"Unterminated string escape at {start}")
                 esc = self._text[self._pos]
-                if esc == "u" and self._pos + 4 < self._len:
+                if esc == "u":
+                    if self._pos + 4 >= self._len:
+                        raise ValueError(f"Incomplete \\u escape at {start}")
                     code = self._text[self._pos + 1 : self._pos + 5]
-                    chars.append(chr(int(code, 16)))
+                    if not all(c in "0123456789abcdefABCDEF" for c in code):
+                        raise ValueError(f"Invalid \\u escape at {start}")
+                    cp = int(code, 16)
+                    if 0xD800 <= cp <= 0xDFFF:
+                        raise ValueError(f"Surrogate codepoint in \\u escape at {start}")
+                    chars.append(chr(cp))
                     self._pos += 5
                 else:
                     chars.append(STR_ESCAPES.get(esc, esc))

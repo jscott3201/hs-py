@@ -49,6 +49,9 @@ class ParseError(ValueError):
 # Maximum filter string length accepted for parsing (10 KB).
 _MAX_FILTER_LENGTH = 10_240
 
+# Maximum nesting depth for parenthesized filter expressions.
+_MAX_FILTER_DEPTH = 50
+
 
 @functools.lru_cache(maxsize=256)
 def parse(text: str) -> Node:
@@ -75,6 +78,7 @@ class _Parser:
         except ValueError as exc:
             raise ParseError(str(exc)) from exc
         self._pos = 0
+        self._depth = 0
 
     def parse(self) -> Node:
         node = self._cond_or()
@@ -106,9 +110,13 @@ class _Parser:
 
         # Parenthesized expression
         if tok.type == TokenType.LPAREN:
+            self._depth += 1
+            if self._depth > _MAX_FILTER_DEPTH:
+                raise ParseError(f"Filter nesting depth exceeds maximum ({_MAX_FILTER_DEPTH})")
             self._advance()
             node = self._cond_or()
             self._expect(TokenType.RPAREN)
+            self._depth -= 1
             return node
 
         # Missing (not path)

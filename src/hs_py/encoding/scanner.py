@@ -59,6 +59,9 @@ MAX_SCAN_DEPTH = 64
 #: Maximum string/URI length in scanned values (1 MB).
 MAX_STRING_LENGTH = 1_048_576
 
+#: Maximum number of elements in a scanned list or dict.
+MAX_COLLECTION_SIZE = 100_000
+
 #: Regex for Zinc datetime values.
 DATETIME_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
@@ -358,9 +361,16 @@ def scan_str(text: str, pos: int) -> tuple[str, int]:
             if pos >= len(text):
                 raise ValueError("Unterminated string escape")
             esc = text[pos]
-            if esc == "u" and pos + 4 < len(text):
+            if esc == "u":
+                if pos + 4 >= len(text):
+                    raise ValueError("Incomplete \\u escape sequence")
                 code = text[pos + 1 : pos + 5]
-                chars.append(chr(int(code, 16)))
+                if not all(c in "0123456789abcdefABCDEF" for c in code):
+                    raise ValueError("Invalid \\u escape sequence")
+                cp = int(code, 16)
+                if 0xD800 <= cp <= 0xDFFF:
+                    raise ValueError("Surrogate codepoint in \\u escape")
+                chars.append(chr(cp))
                 pos += 5
             else:
                 chars.append(STR_ESCAPES.get(esc, esc))
@@ -451,6 +461,9 @@ def scan_list(text: str, pos: int, *, _depth: int = 0) -> tuple[list[Any], int]:
     items: list[Any] = []
     pos = skip_ws(text, pos)
     while pos < len(text) and text[pos] != "]":
+        if len(items) >= MAX_COLLECTION_SIZE:
+            msg = "Maximum collection size exceeded"
+            raise ValueError(msg)
         val, pos = scan_val(text, pos, _depth=_depth)
         items.append(val)
         pos = skip_ws(text, pos)
@@ -473,6 +486,9 @@ def scan_dict(text: str, pos: int, *, _depth: int = 0) -> tuple[dict[str, Any], 
     result: dict[str, Any] = {}
     pos = skip_ws(text, pos)
     while pos < len(text) and text[pos] != "}":
+        if len(result) >= MAX_COLLECTION_SIZE:
+            msg = "Maximum collection size exceeded"
+            raise ValueError(msg)
         # Read tag name
         name, pos = scan_tag_name(text, pos)
         if not name:
@@ -665,7 +681,7 @@ def _scan_nested_grid(text: str, pos: int, *, _depth: int = 0) -> tuple[Any, int
                 inner = text[start:pos].strip()
                 from hs_py.encoding.zinc import decode_grid
 
-                grid = decode_grid(inner)
+                grid = decode_grid(inner, _depth=_depth)
                 return grid, pos + 2
             pos += 2
         else:

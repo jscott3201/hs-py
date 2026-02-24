@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from enum import Enum
 from typing import Any
 
@@ -458,10 +459,16 @@ def _decode_number_v4(obj: dict[str, Any], _depth: int = 0) -> Number:
     return Number(float(val), unit)
 
 
+_REF_VAL_RE_MATCH = re.compile(r"^[a-zA-Z0-9_:\-.~]+$").match
+
+
 def _decode_ref_v4(obj: dict[str, Any], _depth: int = 0) -> Ref:
-    # Fast path: bypass __post_init__ validation — data from storage is pre-validated.
+    # Fast path: bypass __post_init__ for trusted data, but still validate val
+    val = obj["val"]
+    if not isinstance(val, str) or not _REF_VAL_RE_MATCH(val):
+        return Ref(val, obj.get("dis"))  # let __post_init__ raise
     ref = Ref.__new__(Ref)
-    object.__setattr__(ref, "val", obj["val"])
+    object.__setattr__(ref, "val", val)
     object.__setattr__(ref, "dis", obj.get("dis"))
     return ref
 

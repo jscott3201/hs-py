@@ -37,6 +37,9 @@ _log = logging.getLogger(__name__)
 # Maximum PBKDF2 iterations to accept from a server (prevents CPU DoS).
 _MAX_SCRAM_ITERATIONS = 1_000_000
 
+# Minimum PBKDF2 iterations to accept from a server (prevents weak keys).
+_MIN_SCRAM_ITERATIONS = 4096
+
 # Minimum salt length in bytes per NIST SP 800-132 (128 bits).
 _MIN_SALT_BYTES = 16
 
@@ -167,13 +170,18 @@ def scram_client_final(
     sf_params = _parse_scram_msg(server_first_msg)
     s_nonce = sf_params.get("r", "")
     salt_b64 = sf_params.get("s", "")
-    iterations = int(sf_params.get("i", "4096"))
+    try:
+        iterations = int(sf_params.get("i", "4096"))
+    except (ValueError, TypeError) as exc:
+        raise AuthError(f"Invalid SCRAM iteration count: {sf_params.get('i')!r}") from exc
 
     if not s_nonce.startswith(first.c_nonce):
         raise AuthError("Server nonce does not start with client nonce")
 
     if iterations > _MAX_SCRAM_ITERATIONS:
         raise AuthError(f"Server requested excessive PBKDF2 iterations: {iterations}")
+    if iterations < _MIN_SCRAM_ITERATIONS:
+        raise AuthError(f"Server requested insufficient PBKDF2 iterations: {iterations}")
 
     salt = base64.b64decode(salt_b64)
     if len(salt) < _MIN_SALT_BYTES:
@@ -243,7 +251,7 @@ async def _scram_auth(
     async with session.get(url, headers={"Authorization": auth_header}) as resp:
         if resp.status != 401:
             _log.warning("SCRAM step 1 failed: expected 401, got %d", resp.status)
-            raise AuthError(f"Expected 401 during SCRAM step 2, got {resp.status}")
+            raise AuthError(f"Expected 401 during SCRAM step 1, got {resp.status}")
         www_auth = resp.headers.get("WWW-Authenticate", "")
 
     step2_params = _parse_header_params(www_auth)
@@ -270,10 +278,11 @@ async def _scram_auth(
         _log.warning("No authToken in final SCRAM response")
         raise AuthError("No authToken in final SCRAM response")
 
-    # Verify server signature
+    # Verify server signature (mandatory — RFC 5802 mutual authentication)
     server_data = _parse_param(auth_info, "data")
-    if server_data:
-        verify_server_signature(final, _b64url_decode(server_data).decode())
+    if not server_data:
+        raise AuthError("Server signature missing from final response")
+    verify_server_signature(final, _b64url_decode(server_data).decode())
 
     return token
 
