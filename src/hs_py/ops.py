@@ -99,8 +99,20 @@ class HaystackOps:
         return Grid.make_rows(rows)
 
     async def formats(self) -> Grid:
-        """Return supported data formats. Default: JSON only."""
-        return Grid.make_rows([{"mime": "application/json", "receive": MARKER, "send": MARKER}])
+        """Return supported data formats per Haystack filetypes op.
+
+        Reports all MIME types this server can send and/or receive.
+        """
+        return Grid.make_rows(
+            [
+                {"mime": "application/json", "receive": MARKER, "send": MARKER},
+                {"mime": "text/zinc", "receive": MARKER, "send": MARKER},
+                {"mime": "text/trio", "receive": MARKER, "send": MARKER},
+                {"mime": "text/csv", "send": MARKER},
+                {"mime": "text/turtle", "send": MARKER},
+                {"mime": "application/ld+json", "send": MARKER},
+            ]
+        )
 
     async def on_close(self) -> None:
         """Handle server close request. Default: no-op."""

@@ -26,8 +26,14 @@ from hs_py._scram_core import (
     scram_hello,
     validate_bearer,
 )
-from hs_py.content_negotiation import decode_request, encode_response, negotiate_format
+from hs_py.content_negotiation import (
+    UnsupportedContentTypeError,
+    decode_request,
+    encode_response,
+    negotiate_format,
+)
 from hs_py.encoding.json import encode_grid as encode_grid_json
+from hs_py.encoding.zinc import decode_val as zinc_decode_val
 from hs_py.errors import HaystackError
 from hs_py.grid import Grid
 from hs_py.ops import _POST_OP_METHODS, HaystackOps, dispatch_op
@@ -50,6 +56,16 @@ _log = logging.getLogger(__name__)
 
 _GET_OPS = ("about", "ops", "formats", "close")
 _POST_OPS = tuple(_POST_OP_METHODS.keys())
+
+# Ops tagged `noSideEffects` that accept GET with Zinc-encoded query params.
+_NO_SIDE_EFFECTS_OPS: dict[str, str] = {
+    "read": "read",
+    "nav": "nav",
+    "hisRead": "his_read",
+    "defs": "defs",
+    "libs": "libs",
+    "filetypes": "filetypes",
+}
 
 # Maximum request body size (16 MiB)
 _MAX_BODY_SIZE = 16 * 1024 * 1024
@@ -174,8 +190,17 @@ def _get_ops(request: Request) -> HaystackOps:
     return request.app.state.ops  # type: ignore[no-any-return]
 
 
+def _get_default_format(request: Request) -> str:
+    """Return the server's configured default format."""
+    return getattr(request.app.state, "default_format", "json")
+
+
 async def _parse_grid(request: Request) -> Grid:
-    """Decode the request body into a Grid, using content-negotiation."""
+    """Decode the request body into a Grid, using content-negotiation.
+
+    :raises UnsupportedContentTypeError: Propagated to the error middleware
+        which converts it to HTTP 415.
+    """
     body = await request.body()
     if not body:
         return Grid.make_empty()
@@ -185,18 +210,34 @@ async def _parse_grid(request: Request) -> Grid:
     return decode_request(body, ct)
 
 
+def _negotiate_or_406(request: Request) -> str:
+    """Negotiate the response format or raise for HTTP 406."""
+    accept = request.headers.get("accept", "")
+    default = _get_default_format(request)
+    fmt = negotiate_format(accept, default=default)
+    if fmt is None:
+        raise _NotAcceptableError(accept)
+    return fmt
+
+
+class _NotAcceptableError(Exception):
+    """Raised when Accept header contains no supported MIME types."""
+
+    def __init__(self, accept: str) -> None:
+        self.accept = accept
+        super().__init__(f"Not Acceptable: {accept}")
+
+
 def _grid_response(grid: Grid, request: Request) -> Response:
     """Encode a Grid into an HTTP response, honouring the Accept header."""
-    accept = request.headers.get("accept", "application/json")
-    fmt = negotiate_format(accept)
+    fmt = _negotiate_or_406(request)
     body, ct = encode_response(grid, fmt)
     return Response(content=body, media_type=ct)
 
 
 def _cached_grid_response(grid: Grid, request: Request, cache_key: str) -> Response:
     """Encode a Grid with per-format caching on app.state._response_cache."""
-    accept = request.headers.get("accept", "application/json")
-    fmt = negotiate_format(accept)
+    fmt = _negotiate_or_406(request)
     key = (cache_key, fmt)
     cache: dict[tuple[str, str], tuple[bytes, str]] = request.app.state._response_cache
     cached = cache.get(key)
@@ -422,6 +463,35 @@ def _make_read_handler() -> Any:
     return handler
 
 
+def _make_query_get_handler(op_name: str, method_name: str) -> Any:
+    """Create a GET handler for a ``noSideEffects`` op.
+
+    Parses query parameters into a single-row Grid. Values are Zinc-decoded
+    when possible, otherwise treated as strings per the Haystack spec.
+    """
+
+    async def handler(request: Request) -> Response:
+        await _check_op_permission(request, op_name)
+        ops = _get_ops(request)
+        params = dict(request.query_params)
+        if params:
+            row: dict[str, Any] = {}
+            for key, val in params.items():
+                try:
+                    row[key] = zinc_decode_val(val)
+                except Exception:
+                    row[key] = val
+            req_grid = Grid.make_rows([row])
+        else:
+            req_grid = Grid.make_empty()
+        method = getattr(ops, method_name)
+        result_grid: Grid = await method(req_grid)
+        return _grid_response(result_grid, request)
+
+    handler.__name__ = f"{op_name}_query_get_handler"
+    return handler
+
+
 # ---------------------------------------------------------------------------
 # WebSocket dispatch helpers
 # ---------------------------------------------------------------------------
@@ -527,6 +597,15 @@ def _build_router() -> APIRouter:
             handler,
             methods=["POST"],
         )
+
+    # GET with query params for noSideEffects ops (e.g. GET /read?filter=site)
+    for op_name, method_name in _NO_SIDE_EFFECTS_OPS.items():
+        if op_name not in _GET_OPS:
+            router.add_api_route(
+                f"/{op_name}",
+                _make_query_get_handler(op_name, method_name),
+                methods=["GET"],
+            )
 
     # WebSocket endpoint
     @router.websocket("/ws")
@@ -813,12 +892,13 @@ def create_fastapi_app(
     user_store: UserStore | None = None,
     prefix: str = "/api",
     cors_origins: list[str] | None = None,
+    default_format: str = "json",
 ) -> FastAPI:
     """Create a FastAPI application with Haystack HTTP routes.
 
-    The returned app supports content-negotiated responses (JSON, Zinc, CSV),
-    SCRAM-SHA-256 authentication (when an *authenticator* is provided), and
-    WebSocket connections at ``{prefix}/ws``.
+    The returned app supports content-negotiated responses (JSON, Zinc, Trio,
+    CSV, Turtle, JSON-LD), SCRAM-SHA-256 authentication (when an
+    *authenticator* is provided), and WebSocket connections at ``{prefix}/ws``.
 
     :param ops: :class:`~hs_py.ops.HaystackOps` implementation to dispatch to.
         When *None* and *storage* is provided, a default :class:`~hs_py.ops.HaystackOps`
@@ -837,6 +917,10 @@ def create_fastapi_app(
     :param cors_origins: Optional list of allowed CORS origins.  When provided,
         ``CORSMiddleware`` is added with credentials support.  Example:
         ``["http://localhost:3000", "https://app.example.com"]``.
+    :param default_format: Default response format when the client sends ``*/*``
+        or no ``Accept`` header.  The Haystack spec defines ``"zinc"`` as the
+        default; this library defaults to ``"json"`` for ecosystem compatibility.
+        Supported values: ``"json"``, ``"zinc"``.
     :returns: Configured :class:`fastapi.FastAPI` application.
 
     Example::
@@ -857,6 +941,7 @@ def create_fastapi_app(
     app.state.ops = ops
     app.state.storage = storage
     app.state.user_store = user_store
+    app.state.default_format = default_format
     app.state._response_cache = {}
     app.state._ws_grid_cache = {}
 
@@ -892,6 +977,18 @@ def create_fastapi_app(
         """
         try:
             response: StarletteResponse = await call_next(request)
+        except _NotAcceptableError:
+            response = Response(
+                content="Not Acceptable: no supported media type in Accept header",
+                status_code=406,
+                media_type="text/plain",
+            )
+        except UnsupportedContentTypeError as exc:
+            response = Response(
+                content=f"Unsupported Media Type: {exc.mime}",
+                status_code=415,
+                media_type="text/plain",
+            )
         except HaystackError as exc:
             response = _grid_response(Grid.make_error(str(exc)), request)
         except Exception:

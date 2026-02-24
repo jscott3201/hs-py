@@ -374,3 +374,99 @@ class TestEvaluateGrid:
         result = evaluate_grid(node, grid)
         assert len(result) == 1
         assert result[0]["id"] == Ref("e1")
+
+
+# ---- Coverage gaps ----------------------------------------------------------
+
+
+class TestFilterEvalCoverageGaps:
+    def test_missing_multi_segment(self) -> None:
+        """Cover eval.py L90: multi-segment path in _eval_missing."""
+        entity = {"siteRef": Ref("s1")}
+        sites = {"s1": {"dis": "Main"}}
+        resolver = lambda ref: sites.get(ref.val)  # noqa: E731
+        node = parse("not siteRef->dis")
+        result = evaluate(node, entity, resolver=resolver)
+        assert not result  # siteRef->dis resolves to "Main", so not-missing
+
+    def test_resolve_path_non_dict_intermediate(self) -> None:
+        """Cover eval.py L138: non-dict in path chain."""
+        entity = {"siteRef": "not-a-ref"}
+        node = parse("siteRef->dis")
+        result = evaluate(node, entity)
+        assert not result
+
+    def test_resolve_path_non_ref_intermediate(self) -> None:
+        """Cover eval.py L152: non-dict at final segment."""
+        entity = {"siteRef": Ref("s1")}
+        resolver = lambda ref: "not-a-dict"  # noqa: E731
+        node = parse("siteRef->dis")
+        result = evaluate(node, entity, resolver=resolver)
+        assert not result
+
+    def test_grid_resolver_empty_index(self) -> None:
+        """Cover eval.py L203: grid with id col but no Ref rows."""
+        grid = Grid.make_rows([{"id": "not-a-ref", "dis": "Test"}])
+        node = parse("dis")
+        result = evaluate_grid(node, grid)
+        assert len(result) == 1  # match by dis, but resolver returns None
+
+
+class TestFilterLexerCoverageGaps:
+    def test_le_operator(self) -> None:
+        """Cover lexer.py L120: <= operator."""
+        node = parse("temp <= 100")
+        result = evaluate(node, {"temp": Number(50)})
+        assert result
+
+    def test_scientific_notation_with_sign(self) -> None:
+        """Cover lexer.py L273: exponent with sign."""
+        node = parse("val == 1.5e+2")
+        result = evaluate(node, {"val": Number(150)})
+        assert result
+
+    def test_unicode_escape_incomplete(self) -> None:
+        r"""Cover lexer.py L187: incomplete \u escape."""
+        with pytest.raises(ValueError, match="Incomplete"):
+            parse('dis == "ab\\u00"')
+
+    def test_unicode_escape_invalid_hex(self) -> None:
+        r"""Cover lexer.py L190: invalid hex in \u escape."""
+        with pytest.raises(ValueError, match="Invalid"):
+            parse('dis == "ab\\uXXXX"')
+
+    def test_unicode_escape_surrogate(self) -> None:
+        r"""Cover lexer.py L193: surrogate codepoint in \u escape."""
+        with pytest.raises(ValueError, match="Surrogate"):
+            parse('dis == "ab\\uD800"')
+
+    def test_trailing_whitespace_eof(self) -> None:
+        """Cover lexer.py L97: trailing whitespace → EOF."""
+        node = parse("site  ")
+        result = evaluate(node, {"site": MARKER})
+        assert result
+
+
+class TestFilterParserCoverageGaps:
+    def test_filter_exceeds_max_length(self) -> None:
+        """Cover parser.py L67-68: filter string too long."""
+        from hs_py.filter.parser import ParseError
+
+        long_filter = "a" * 20_000
+        with pytest.raises(ParseError, match="exceeds maximum"):
+            parse(long_filter)
+
+    def test_nesting_depth_exceeded(self) -> None:
+        """Cover parser.py L115: nesting depth exceeded."""
+        from hs_py.filter.parser import ParseError
+
+        deep = "(" * 60 + "site" + ")" * 60
+        with pytest.raises(ParseError, match="depth"):
+            parse(deep)
+
+    def test_unexpected_token_in_value(self) -> None:
+        """Cover parser.py L167: unexpected token type."""
+        from hs_py.filter.parser import ParseError
+
+        with pytest.raises(ParseError):
+            parse("temp == )")

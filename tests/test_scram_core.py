@@ -237,6 +237,75 @@ class TestHandleScramExpiredHandshake:
         assert result.status == 401
 
 
+class TestScramStep1EmptyNonce:
+    def test_empty_nonce_returns_401(self) -> None:
+        """Cover _scram_core.py L174: empty client nonce → 401."""
+        state = HandshakeState(
+            username="u",
+            server_nonce="",
+            salt=b"salt1234567890ab",
+            iterations=4096,
+            stored_key=b"k" * 32,
+            server_key=b"s" * 32,
+        )
+        handshakes: dict[str, HandshakeState] = {"tok": state}
+        # Send message with no 'r' param (no nonce)
+        result = scram_step1(handshakes, "tok", state, "n,,n=user")
+        assert result.status == 401
+
+
+class TestScramStep2NonceMismatch:
+    def test_nonce_mismatch_returns_403(self) -> None:
+        """Cover _scram_core.py L224: nonce mismatch → 403."""
+        state = HandshakeState(
+            username="u",
+            server_nonce="correct-combined-nonce",
+            salt=b"salt",
+            iterations=4096,
+            stored_key=b"k" * 32,
+            server_key=b"s" * 32,
+            auth_message="test",
+            step=2,
+        )
+        tokens: dict[str, TokenEntry] = {}
+        handshakes: dict[str, HandshakeState] = {"tok": state}
+        result = scram_step2(
+            handshakes,
+            tokens,
+            "tok",
+            state,
+            f"c={_b64url_encode(b'n,,')},r=wrong-nonce,p=dGVzdA",
+        )
+        assert result.status == 403
+        assert result.body == "Authentication failed"
+
+
+class TestScramStep2ChannelBindingMismatch:
+    def test_bad_channel_binding_returns_403(self) -> None:
+        """Cover _scram_core.py L229: channel binding mismatch → 403."""
+        state = HandshakeState(
+            username="u",
+            server_nonce="combined-nonce",
+            salt=b"salt",
+            iterations=4096,
+            stored_key=b"k" * 32,
+            server_key=b"s" * 32,
+            auth_message="test",
+            step=2,
+        )
+        tokens: dict[str, TokenEntry] = {}
+        handshakes: dict[str, HandshakeState] = {"tok": state}
+        result = scram_step2(
+            handshakes,
+            tokens,
+            "tok",
+            state,
+            "c=WRONGBINDING,r=combined-nonce,p=dGVzdA",
+        )
+        assert result.status == 403
+        assert result.body == "Authentication failed"
+
+
 class TestHandleScramBadData:
     def test_invalid_base64_data(self) -> None:
         """Cover _scram_core.py L300-301: bad base64 in data."""

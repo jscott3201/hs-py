@@ -311,10 +311,10 @@ class HaystackWebSocket:
         if _write_pending(self._protocol, self._writer):
             await self._writer.drain()
 
-    async def recv(self) -> bytes:
+    async def recv(self) -> str | bytes:
         """Receive the next WebSocket message payload.
 
-        :returns: Message payload bytes.
+        :returns: ``str`` for text frames, ``bytes`` for binary frames.
         :raises ConnectionClosedOK: On graceful close.
         :raises ConnectionClosedError: On abnormal close.
         """
@@ -351,10 +351,12 @@ class HaystackWebSocket:
 
             await self._flush_outgoing()
 
-    def _handle_frame(self, frame: Frame) -> bytes | None:
+    def _handle_frame(self, frame: Frame) -> str | bytes | None:
         """Process a single frame. Return payload for data frames, None for control."""
-        if frame.opcode in (Opcode.BINARY, Opcode.TEXT):
+        if frame.opcode == Opcode.BINARY:
             return bytes(frame.data)
+        if frame.opcode == Opcode.TEXT:
+            return bytes(frame.data).decode()
         if frame.opcode == Opcode.CLOSE:
             rcvd = Close.parse(frame.data) if frame.data else None
             raise ConnectionClosedOK(rcvd, None, rcvd_then_sent=None)

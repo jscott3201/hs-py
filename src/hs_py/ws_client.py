@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import orjson
@@ -35,9 +36,11 @@ from hs_py.metrics import MetricsHooks, _fire
 from hs_py.tls import TLSConfig, build_client_ssl_context
 from hs_py.ws import HaystackWebSocket, cancel_task, heartbeat_loop
 from hs_py.ws_codec import (
+    FLAG_CHUNKED,
     FLAG_ERROR,
     FLAG_PUSH,
     FLAG_RESPONSE,
+    ChunkAssembler,
     decode_binary_frame,
     encode_binary_request,
 )
@@ -102,6 +105,8 @@ class WebSocketClient:
         compression: bool = False,
         binary: bool = False,
         pythonic: bool = True,
+        binary_compression: int | None = None,
+        chunked: bool = False,
     ) -> None:
         """Initialise the WebSocket client.
 
@@ -119,6 +124,9 @@ class WebSocketClient:
         :param pythonic: When ``True`` (default) Grid-returning methods return
             ``list[dict[str, Any]]`` with Haystack kinds converted to plain Python
             values.  Pass ``False`` to always return raw :class:`~hs_py.grid.Grid`.
+        :param binary_compression: Codec-level compression algorithm for binary
+            frames (e.g. ``COMP_ZLIB``).  ``None`` disables codec compression.
+        :param chunked: Enable chunked transfer for large binary payloads.
         """
         self._url = url
         self._username = username
@@ -130,6 +138,8 @@ class WebSocketClient:
         self._metrics = metrics or MetricsHooks()
         self._compression = compression
         self._binary = binary
+        self._binary_compression = binary_compression
+        self._chunked = chunked
         self._pythonic = pythonic
         self._ws: HaystackWebSocket | None = None
         self._next_id = 0
@@ -149,6 +159,9 @@ class WebSocketClient:
             await self._scram_authenticate()
         elif self._auth_token:
             await self._ws.send_text(orjson.dumps({"authToken": self._auth_token}).decode())
+        # Negotiate capabilities before starting recv loop
+        if self._binary_compression is not None or self._chunked:
+            await self._negotiate_capabilities()
         self._recv_task = asyncio.create_task(self._recv_loop(), name="hs-ws-recv")
         if self._heartbeat > 0:
             self._heartbeat_task = asyncio.create_task(
@@ -250,6 +263,53 @@ class WebSocketClient:
             verify_server_signature(final, _b64url_decode(server_data).decode())
 
         _log.debug("WebSocket SCRAM auth succeeded")
+
+    async def _negotiate_capabilities(self) -> None:
+        """Exchange capabilities with the server for v2 features."""
+        assert self._ws is not None
+        from hs_py.ws_codec import COMP_LZMA, COMP_ZLIB
+
+        algo_names = {COMP_ZLIB: "zlib", COMP_LZMA: "lzma"}
+        compression_list: list[str] = []
+        if self._binary_compression is not None:
+            name = algo_names.get(self._binary_compression)
+            if name:
+                compression_list.append(name)
+
+        msg = {
+            "type": "capabilities",
+            "compression": compression_list,
+            "chunked": self._chunked,
+            "version": 2,
+        }
+        await self._ws.send_text(orjson.dumps(msg).decode())
+
+        try:
+            async with asyncio.timeout(5.0):
+                data = await self._ws.recv()
+            resp = orjson.loads(data)
+            if resp.get("type") == "capabilities":
+                agreed_comp = resp.get("compression")
+                if agreed_comp is None:
+                    self._binary_compression = None
+                agreed_chunked = resp.get("chunked", False)
+                if not agreed_chunked:
+                    self._chunked = False
+                _log.debug(
+                    "Capabilities negotiated: compression=%s chunked=%s",
+                    agreed_comp,
+                    agreed_chunked,
+                )
+            else:
+                # Server didn't understand capabilities — fall back to v1
+                self._binary_compression = None
+                self._chunked = False
+                _log.debug("Server does not support capabilities negotiation, using v1")
+        except (TimeoutError, Exception):
+            # Timeout or error — fall back to v1
+            self._binary_compression = None
+            self._chunked = False
+            _log.debug("Capabilities negotiation failed, falling back to v1")
 
     # ---- Standard ops (mirrors Client) -------------------------------------
 
@@ -642,7 +702,12 @@ class WebSocketClient:
 
         try:
             if self._binary:
-                frame = encode_binary_request(req_id_int, op, grid)
+                frame = encode_binary_request(
+                    req_id_int,
+                    op,
+                    grid,
+                    compression=self._binary_compression,
+                )
                 await ws.send_bytes(frame)
                 _fire(self._metrics.on_ws_message_sent, op, len(frame))
             else:
@@ -666,17 +731,27 @@ class WebSocketClient:
     async def _recv_loop(self) -> None:
         """Background task: read messages and dispatch responses/pushes."""
         ws = self._require_ws()
+        chunk_assembler = ChunkAssembler() if self._chunked else None
+        last_cleanup = time.monotonic()
         try:
             while True:
                 data = await ws.recv()
 
-                # Binary frame handling
-                if self._binary:
-                    self._handle_binary_frame(data)
+                # Periodic cleanup of orphaned chunk buffers
+                if chunk_assembler is not None:
+                    now = time.monotonic()
+                    if now - last_cleanup > 30.0:
+                        chunk_assembler.cleanup(now)
+                        last_cleanup = now
+
+                # Binary frame handling — only bytes from binary WS frames
+                if isinstance(data, bytes) and self._binary:
+                    self._handle_binary_frame(data, chunk_assembler)
                     continue
 
+                text = data if isinstance(data, str) else data.decode()
                 try:
-                    msg = orjson.loads(data)
+                    msg = orjson.loads(text)
                 except orjson.JSONDecodeError:
                     _log.warning("Received non-JSON WebSocket message, ignoring")
                     continue
@@ -709,13 +784,29 @@ class WebSocketClient:
         if not _resolve_grid_response(self._pending, msg):
             _log.debug("Received unmatched WebSocket message: %s", msg.get("id"))
 
-    def _handle_binary_frame(self, data: bytes) -> None:
+    def _handle_binary_frame(
+        self,
+        data: bytes,
+        chunk_assembler: ChunkAssembler | None = None,
+    ) -> None:
         """Process a binary frame response or push."""
         try:
             flags, req_id, op, grid_bytes = decode_binary_frame(data)
         except ValueError:
             _log.warning("Invalid binary frame, ignoring")
             return
+
+        # Chunked frame — accumulate until complete
+        if flags & FLAG_CHUNKED:
+            if chunk_assembler is None:
+                _log.warning("Received chunked frame but chunking is not enabled, ignoring")
+                return
+            assembled = chunk_assembler.feed(flags, req_id, op, grid_bytes)
+            if assembled is None:
+                return  # waiting for more chunks
+            grid_bytes = assembled
+            # Clear the chunked flag for downstream processing
+            flags &= ~FLAG_CHUNKED
 
         if flags & FLAG_PUSH:
             if self._watch_callback is not None:
@@ -796,6 +887,8 @@ class ReconnectingWebSocketClient:
         compression: bool = False,
         binary: bool = False,
         pythonic: bool = True,
+        binary_compression: int | None = None,
+        chunked: bool = False,
     ) -> None:
         """Initialise the reconnecting client.
 
@@ -815,6 +908,8 @@ class ReconnectingWebSocketClient:
         :param binary: Use binary frame encoding instead of JSON envelopes.
         :param pythonic: When ``True`` (default) Grid-returning methods return
             ``list[dict[str, Any]]``.  Pass ``False`` to always return raw Grid.
+        :param binary_compression: Codec-level compression for binary frames.
+        :param chunked: Enable chunked transfer for large binary payloads.
         """
         self._url = url
         self._username = username
@@ -830,6 +925,8 @@ class ReconnectingWebSocketClient:
         self._metrics = metrics
         self._compression = compression
         self._binary = binary
+        self._binary_compression = binary_compression
+        self._chunked = chunked
         self._pythonic = pythonic
         self._inner: WebSocketClient | None = None
         self._loop_task: asyncio.Task[None] | None = None
@@ -1059,6 +1156,61 @@ class ReconnectingWebSocketClient:
         """Invoke an action on an entity."""
         return await self._require_inner().invoke_action(id, action, args, raw=raw)
 
+    async def batch(self, *calls: tuple[str, Grid]) -> list[Grid]:
+        """Send multiple operations in a single WebSocket frame."""
+        return await self._require_inner().batch(*calls)
+
+    @overload
+    async def his_read_batch(self, ids: list[Ref], range: str, *, raw: Literal[True]) -> Grid: ...
+    @overload
+    async def his_read_batch(
+        self, ids: list[Ref], range: str, *, raw: Literal[False]
+    ) -> list[dict[str, Any]]: ...
+    @overload
+    async def his_read_batch(
+        self, ids: list[Ref], range: str, *, raw: bool
+    ) -> Grid | list[dict[str, Any]]: ...
+    async def his_read_batch(
+        self, ids: list[Ref], range: str, *, raw: bool = False
+    ) -> Grid | list[dict[str, Any]]:
+        """Read time-series data for multiple points."""
+        return await self._require_inner().his_read_batch(ids, range, raw=raw)
+
+    async def his_write_batch(self, grid: Grid) -> None:
+        """Write time-series data for multiple points."""
+        await self._require_inner().his_write_batch(grid)
+
+    @overload
+    async def point_write_array(self, id: Ref, *, raw: Literal[True]) -> Grid: ...
+    @overload
+    async def point_write_array(self, id: Ref, *, raw: Literal[False]) -> list[dict[str, Any]]: ...
+    @overload
+    async def point_write_array(self, id: Ref, *, raw: bool) -> Grid | list[dict[str, Any]]: ...
+    async def point_write_array(
+        self, id: Ref, *, raw: bool = False
+    ) -> Grid | list[dict[str, Any]]:
+        """Read the priority array of a writable point."""
+        return await self._require_inner().point_write_array(id, raw=raw)
+
+    async def point_write(
+        self,
+        id: Ref,
+        level: int,
+        val: Any,
+        who: str = "",
+        duration: Number | None = None,
+    ) -> None:
+        """Write to a priority array level."""
+        await self._require_inner().point_write(id, level, val, who, duration)
+
+    async def watch_close(self, watch_id: str) -> None:
+        """Close a watch entirely."""
+        await self._require_inner().watch_close(watch_id)
+
+    async def close(self) -> None:
+        """Close the connection (alias for :meth:`stop`)."""
+        await self.stop()
+
     # ---- Internal ----------------------------------------------------------
 
     async def _connect_loop(self) -> None:
@@ -1079,6 +1231,8 @@ class ReconnectingWebSocketClient:
                     compression=self._compression,
                     binary=self._binary,
                     pythonic=self._pythonic,
+                    binary_compression=self._binary_compression,
+                    chunked=self._chunked,
                 )
                 await client.__aenter__()
                 self._inner = client

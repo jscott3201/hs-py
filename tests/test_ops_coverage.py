@@ -447,3 +447,59 @@ class TestPushWatch:
         await ops.push_watch("w1", g)
         assert len(captured) == 1
         assert captured[0][0] == "w1"
+
+
+# ---------------------------------------------------------------------------
+# Coverage gaps
+# ---------------------------------------------------------------------------
+
+
+class TestReadCoverageGaps:
+    async def test_read_filter_empty_result(self) -> None:
+        """Cover ops.py L143: read filter returns empty list."""
+        ops = _make_ops([SITE])
+        req = GridBuilder().add_col("filter").add_row({"filter": "nonexistent"}).to_grid()
+        g = await ops.read(req)
+        assert len(g) == 0
+
+    async def test_read_filter_no_cached_col_names(self) -> None:
+        """Cover ops.py L148: make_rows without cached col_names."""
+        ops = _make_ops([SITE, POINT])
+        # Remove cached col_names if present
+        if hasattr(ops._storage, "all_col_names"):
+            original = ops._storage.all_col_names
+            try:
+                type(ops._storage).all_col_names = property(lambda self: None)  # type: ignore[assignment]
+                req = GridBuilder().add_col("filter").add_row({"filter": "site"}).to_grid()
+                g = await ops.read(req)
+                assert len(g) == 1
+            finally:
+                type(ops._storage).all_col_names = original  # type: ignore[assignment]
+
+
+class TestNavCoverageGaps:
+    async def test_nav_with_ref_nav_id(self) -> None:
+        """Cover ops.py L158-160: navId as Ref value."""
+        ops = _make_ops([SITE, EQUIP, POINT])
+        req = GridBuilder().add_col("navId").add_row({"navId": Ref("s1")}).to_grid()
+        g = await ops.nav(req)
+        assert len(g) >= 1
+
+    async def test_nav_with_empty_nav_id(self) -> None:
+        """Cover ops.py L158: navId present but empty string."""
+        ops = _make_ops([SITE, EQUIP, POINT])
+        req = GridBuilder().add_col("navId").add_row({"navId": ""}).to_grid()
+        g = await ops.nav(req)
+        # Empty string navId → treated as no navId, returns top-level
+        assert len(g) >= 1
+
+
+class TestPointWriteCoverageGaps:
+    async def test_point_write_level_out_of_range(self) -> None:
+        """Cover ops.py L218: level out of 1-17 range."""
+        ops = _make_ops([POINT])
+        req = GridBuilder().add_col("id").add_col("level").add_col("val")
+        req.add_row({"id": Ref("p1"), "level": Number(20.0), "val": Number(72.0)})
+        g = await ops.point_write(req.to_grid())
+        assert g.is_error
+        assert "1-17" in g.meta.get("dis", "")

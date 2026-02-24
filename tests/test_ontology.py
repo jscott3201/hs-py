@@ -269,3 +269,117 @@ is: ^entity
         assert ns.is_subtype("site", "entity")
         assert ns.get("site") is not None
         assert ns.get("site").doc == "A site."  # type: ignore[union-attr]
+
+
+# ---- Ontology coverage gaps ------------------------------------------------
+
+
+class TestOntologyModuleGetattr:
+    """Cover ontology/__init__.py L61-62: unknown attribute → AttributeError."""
+
+    def test_unknown_attr_raises(self) -> None:
+        import hs_py.ontology as ont_mod
+
+        with pytest.raises(AttributeError, match="has no attribute"):
+            _ = ont_mod.nonexistent_thing  # type: ignore[attr-defined]
+
+
+class TestLibVersionCoercion:
+    """Cover ontology/defs.py L121: non-string version → str()."""
+
+    def test_non_string_version(self) -> None:
+        lib = Lib.from_meta(
+            {"def": Symbol("lib:test"), "version": 42},
+            defs=(),
+        )
+        assert lib.version == "42"
+
+    def test_single_symbol_depends(self) -> None:
+        """Cover ontology/defs.py L126: single Symbol depends (not list)."""
+        lib = Lib.from_meta(
+            {"def": Symbol("lib:test"), "version": "1.0", "depends": Symbol("lib:ph")},
+            defs=(),
+        )
+        assert len(lib.depends) == 1
+        assert lib.depends[0] == Symbol("lib:ph")
+
+
+class TestNamespaceEdgeCases:
+    """Cover namespace.py uncovered branches."""
+
+    def _make_ns(self) -> Namespace:
+        defs = [
+            Def(Symbol("marker"), {"def": Symbol("marker")}),
+            Def(Symbol("entity"), {"def": Symbol("entity"), "is": Symbol("marker")}),
+            Def(Symbol("site"), {"def": Symbol("site"), "is": Symbol("entity")}),
+            # has a parent that doesn't exist in namespace
+            Def(Symbol("orphan"), {"def": Symbol("orphan"), "is": Symbol("nonexistent")}),
+            # diamond: both paths lead to entity
+            Def(Symbol("tagged"), {"def": Symbol("tagged"), "is": Symbol("marker")}),
+            Def(
+                Symbol("diamond"),
+                {"def": Symbol("diamond"), "is": [Symbol("entity"), Symbol("tagged")]},
+            ),
+        ]
+        lib = Lib(symbol=Symbol("lib:ph"), defs=tuple(defs))
+        return Namespace([lib])
+
+    def test_all_libs(self) -> None:
+        """Cover namespace.py L150: all_libs() iterator."""
+        ns = self._make_ns()
+        libs = list(ns.all_libs())
+        assert len(libs) == 1
+        assert libs[0].symbol == Symbol("lib:ph")
+
+    def test_supertypes_unknown_parent(self) -> None:
+        """Cover namespace.py L186: parent symbol not in namespace."""
+        ns = self._make_ns()
+        # orphan's parent 'nonexistent' is not in the namespace
+        supers = ns.supertypes("orphan")
+        assert len(supers) == 0
+
+    def test_supertypes_unknown_def(self) -> None:
+        """Cover namespace.py L182: def itself doesn't exist."""
+        ns = self._make_ns()
+        supers = ns.supertypes("totally_unknown")
+        assert len(supers) == 0
+
+    def test_is_subtype_unknown_def(self) -> None:
+        """Cover namespace.py L207/211: unknown def in traversal chain."""
+        ns = self._make_ns()
+        assert not ns.is_subtype("orphan", "marker")
+
+    def test_is_subtype_unknown_sub(self) -> None:
+        """Cover namespace.py L211: sub is completely unknown → d is None."""
+        ns = self._make_ns()
+        assert not ns.is_subtype("totally_unknown", "marker")
+
+    def test_is_subtype_diamond_revisit(self) -> None:
+        """Cover namespace.py L207: visited node revisited in BFS."""
+        ns = self._make_ns()
+        # diamond→entity→marker AND diamond→tagged→marker
+        # Both paths reach marker, so 'marker' gets queued twice
+        assert ns.is_subtype("diamond", "marker")
+
+    def test_all_supertypes_with_unknown_in_chain(self) -> None:
+        """Cover namespace.py L239: all_supertypes unknown def in chain."""
+        ns = self._make_ns()
+        supers = ns.all_supertypes("orphan")
+        assert len(supers) == 0
+
+    def test_all_supertypes_diamond_revisit(self) -> None:
+        """Cover namespace.py L234: visited check in all_supertypes BFS."""
+        ns = self._make_ns()
+        supers = ns.all_supertypes("diamond")
+        names = {d.symbol.val for d in supers}
+        # Should include entity, tagged, marker (each only once)
+        assert "entity" in names
+        assert "tagged" in names
+        assert "marker" in names
+
+    def test_all_supertypes_caching(self) -> None:
+        """Cover namespace.py L228: cache hit on second call."""
+        ns = self._make_ns()
+        supers1 = ns.all_supertypes("site")
+        supers2 = ns.all_supertypes("site")
+        assert supers1 is supers2  # same object from cache

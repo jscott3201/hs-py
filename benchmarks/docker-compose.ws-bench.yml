@@ -1,0 +1,27 @@
+# WebSocket compression benchmark
+#
+# Runs server + client in the same container over TCP loopback.
+# Tests JSON vs binary vs binary+zlib vs binary+lzma throughput.
+#
+# Usage:
+#   cd benchmarks && docker compose -f docker-compose.ws-bench.yml up --build
+
+services:
+  ws-bench:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile.ws_bench
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    volumes:
+      - ./results:/results
+    environment:
+      HOST: "127.0.0.1"
+      PORT: "9876"
+      CONCURRENCY: "10"
+      DURATION_S: "15"
+      WARMUP_S: "3"
+      ENTITY_COUNT: "5000"
+      RESULTS_FILE: /results/ws_compression.json

@@ -103,6 +103,13 @@ Client Options
    * - ``compression``
      - ``bool``
      - Enable permessage-deflate compression (default: ``False``)
+   * - ``binary_compression``
+     - ``int | None``
+     - Codec-level compression for binary frames: ``COMP_ZLIB`` or ``COMP_LZMA``
+       (default: ``None`` = disabled)
+   * - ``chunked``
+     - ``bool``
+     - Enable chunked transfer for large binary payloads (default: ``False``)
 
 .. _guide-ws-watches:
 
@@ -214,9 +221,21 @@ Binary frame header format:
 
 .. code-block:: text
 
-   Byte 0: Flags (FLAG_RESPONSE=0x01, FLAG_ERROR=0x02, FLAG_PUSH=0x04)
+   Byte 0: Flags
+     bit 0 = FLAG_RESPONSE (0x01)
+     bit 1 = FLAG_ERROR    (0x02)
+     bit 2 = FLAG_PUSH     (0x04)
+     bit 3 = FLAG_COMPRESSED (0x08)  — v2 codec-level compression
+     bit 4 = FLAG_CHUNKED    (0x10)  — v2 chunked transfer
    Bytes 1-2: Request ID (uint16, big-endian)
    Byte 3: Operation code (uint8)
+
+   IF compressed (bit 3 set):
+     Byte 4: Algorithm (0=zlib, 1=lzma)
+
+   IF chunked (bit 4 set):
+     Next 2 bytes: Chunk index (uint16, big-endian)
+     Next 2 bytes: Total chunks (uint16, big-endian)
 
 Operation codes: ``about=1``, ``ops=2``, ``formats=3``, ``close=4``,
 ``read=10``, ``nav=11``, ``hisRead=12``, ``hisWrite=13``, ``pointWrite=14``,
@@ -227,7 +246,10 @@ Operation codes: ``about=1``, ``ops=2``, ``formats=3``, ``close=4``,
 Compression
 ^^^^^^^^^^^
 
-Enable permessage-deflate for bandwidth reduction on text-heavy payloads:
+haystack-py offers two levels of WebSocket compression:
+
+**Transport-level** (permessage-deflate) — compresses all frames at the WebSocket
+protocol layer using zlib.  Good for text-mode JSON payloads:
 
 .. code-block:: python
 
@@ -236,6 +258,73 @@ Enable permessage-deflate for bandwidth reduction on text-heavy payloads:
        compression=True,
    ) as ws:
        points = await ws.read("point")
+
+**Codec-level** (v2 binary frames) — compresses individual payloads at the
+application layer with per-payload algorithm selection.  Requires ``binary=True``.
+Supports zlib (fast) and LZMA (high ratio):
+
+.. code-block:: python
+
+   from hs_py.ws_codec import COMP_ZLIB, COMP_LZMA
+
+   async with WebSocketClient(
+       "ws://host/api/ws", auth_token="token",
+       binary=True,
+       binary_compression=COMP_ZLIB,  # or COMP_LZMA
+   ) as ws:
+       # Payloads > 1 KB are automatically compressed
+       points = await ws.read("point")
+
+Codec compression benchmarks on a 1.8 MB Haystack grid (5,000 rows):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 15 15
+
+   * - Algorithm
+     - Compressed
+     - Compress
+     - Decompress
+   * - zlib (level 1)
+     - 60 KB (97%)
+     - 2.5 ms
+     - 0.3 ms
+   * - LZMA (raw, preset 0)
+     - 13 KB (99.3%)
+     - 29 ms
+     - 1.8 ms
+
+Chunked Transfer
+^^^^^^^^^^^^^^^^
+
+For very large payloads, enable chunked transfer to split responses into
+independently-compressed 256 KB chunks.  This avoids blocking the WebSocket
+connection with multi-megabyte single frames:
+
+.. code-block:: python
+
+   from hs_py.ws_codec import COMP_ZLIB
+
+   # Client
+   async with WebSocketClient(
+       "ws://host/api/ws", auth_token="token",
+       binary=True,
+       binary_compression=COMP_ZLIB,
+       chunked=True,
+   ) as ws:
+       # Large hisRead responses are automatically chunked
+       history = await ws.his_read(Ref("p1"), "lastMonth")
+
+   # Server
+   server = WebSocketServer(
+       ops, host="0.0.0.0", port=8080,
+       binary=True,
+       binary_compression=COMP_ZLIB,
+       chunked=True,
+   )
+
+Each chunk carries a sequence number and total count.  The receiving side
+reassembles chunks transparently via :class:`~hs_py.ws_codec.ChunkAssembler`.
 
 .. _guide-ws-reconnect:
 
@@ -333,6 +422,8 @@ Features:
 
 - **JSON envelope dispatch** — routes ``op`` field to the matching handler
 - **Binary frame support** — decodes binary frames and responds in kind
+- **Codec compression** — zlib/LZMA compression at the binary frame level
+- **Chunked transfer** — splits large responses into sequenced chunks
 - **Batch requests** — processes ``batch`` messages as parallel operations
 - **Watch push** — distributes watch updates to connected clients
 - **Certificate auth** — extracts client CN from TLS for mTLS authentication

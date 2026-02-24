@@ -232,3 +232,60 @@ class TestCompileNamespaceValidation:
             raise AssertionError("should raise NormalizeError")
         except Exception as e:
             assert "cycle" in str(e)
+
+
+# ---- Coverage gaps ----------------------------------------------------------
+
+
+class TestTagOnEdgeCases:
+    def test_tag_on_none_value(self) -> None:
+        """Cover taxonomy.py L109: def exists with no tagOn → []."""
+        defs = [
+            Def(Symbol("site"), {"def": Symbol("site")}),
+        ]
+        lib = Lib(symbol=Symbol("lib:test"), defs=tuple(defs))
+        ns = Namespace([lib])
+        # 'site' exists but has no tagOn
+        assert tag_on_defs(ns, "site") == []
+
+    def test_tag_on_non_symbol_value(self) -> None:
+        """Cover taxonomy.py L114: tagOn is neither Symbol nor list → []."""
+        defs = [
+            Def(Symbol("weird"), {"def": Symbol("weird"), "tagOn": "not-a-symbol"}),
+        ]
+        lib = Lib(symbol=Symbol("lib:test"), defs=tuple(defs))
+        ns = Namespace([lib])
+        assert tag_on_defs(ns, "weird") == []
+
+
+class TestNormalizeNameCollision:
+    def test_name_collision_keeps_first(self) -> None:
+        """Cover normalize.py L50: short name already in by_name."""
+        # Two defs with same short name but different qualified symbols
+        defs = [
+            Def(Symbol("ph::site"), {"def": Symbol("ph::site")}),
+            Def(Symbol("ext::site"), {"def": Symbol("ext::site")}),
+        ]
+        lib = Lib(symbol=Symbol("lib:test"), defs=tuple(defs))
+        ns = Namespace([lib])
+        # Both should be accessible by qualified name
+        assert ns.get("ph::site") is not None
+        assert ns.get("ext::site") is not None
+
+    def test_conjunct_already_has_all_parts(self) -> None:
+        """Cover normalize.py L89: conjunct supers unchanged."""
+        defs = [
+            Def(Symbol("hot"), {"def": Symbol("hot")}),
+            Def(Symbol("water"), {"def": Symbol("water")}),
+            # Already lists hot and water as supers
+            Def(
+                Symbol("hot-water"),
+                {"def": Symbol("hot-water"), "is": [Symbol("hot"), Symbol("water")]},
+            ),
+        ]
+        lib = Lib(symbol=Symbol("lib:test"), defs=tuple(defs))
+        ns = compile_namespace([lib])
+        d = ns.get("hot-water")
+        assert d is not None
+        is_names = {s.val for s in d.is_list}
+        assert is_names == {"hot", "water"}

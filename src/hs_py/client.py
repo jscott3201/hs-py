@@ -16,8 +16,8 @@ from typing import Any, Literal, overload
 import aiohttp
 
 from hs_py.auth import authenticate
+from hs_py.content_negotiation import _FORMAT_TO_CONTENT_TYPE, decode_request
 from hs_py.convert import grid_to_pythonic
-from hs_py.encoding.json import decode_grid, encode_grid
 from hs_py.errors import AuthError, CallError, NetworkError
 from hs_py.grid import Grid, GridBuilder
 from hs_py.kinds import MARKER, Number, Ref
@@ -56,6 +56,7 @@ class Client:
         connector: aiohttp.BaseConnector | None = None,
         tls: TLSConfig | None = None,
         pythonic: bool = True,
+        accept_format: str = "json",
     ) -> None:
         """Initialise the client.
 
@@ -68,6 +69,9 @@ class Client:
         :param pythonic: When ``True`` (default) Grid-returning methods return
             ``list[dict[str, Any]]`` with Haystack kinds converted to plain Python
             values.  Pass ``False`` to always return raw :class:`~hs_py.grid.Grid`.
+        :param accept_format: Wire format for request/response bodies.  Supported
+            values: ``"json"`` (default), ``"zinc"``.  Controls the ``Content-Type``
+            and ``Accept`` headers sent to the server.
         """
         self._base_url = base_url.rstrip("/")
         self._username = username
@@ -76,6 +80,8 @@ class Client:
         self._connector = connector
         self._tls = tls
         self._pythonic = pythonic
+        self._accept_format = accept_format
+        self._content_type = _FORMAT_TO_CONTENT_TYPE.get(accept_format, _JSON_CT)
         self._session: aiohttp.ClientSession | None = None
         self._auth_token: str | None = None
 
@@ -530,7 +536,10 @@ class Client:
 
     def _auth_headers(self) -> dict[str, str]:
         """Return authorization headers."""
-        headers: dict[str, str] = {"Content-Type": _JSON_CT, "Accept": _JSON_CT}
+        headers: dict[str, str] = {
+            "Content-Type": self._content_type,
+            "Accept": self._content_type,
+        }
         if self._auth_token:
             headers["Authorization"] = f"BEARER authToken={self._auth_token}"
         return headers
@@ -561,7 +570,10 @@ class Client:
 
     async def _call(self, op: str, grid: Grid) -> Grid:
         """POST a grid to an operation endpoint and return the response grid."""
-        return await self._request("POST", op, data=encode_grid(grid))
+        from hs_py.content_negotiation import encode_response as _encode_response
+
+        body, _ = _encode_response(grid, self._accept_format)
+        return await self._request("POST", op, data=body)
 
     async def _call_get(self, op: str, params: dict[str, str] | None = None) -> Grid:
         """GET an operation endpoint and return the response grid."""
@@ -571,10 +583,15 @@ class Client:
         """Decode a response and check for error grids."""
         if resp.status == 401:
             raise AuthError(f"Authentication failed: {resp.status}")
+        if resp.status == 406:
+            raise CallError("Server does not support requested Accept format", Grid.make_empty())
+        if resp.status == 415:
+            raise CallError("Server does not support request Content-Type", Grid.make_empty())
         data = await resp.read()
         if not data:
             return Grid.make_empty()
-        grid = decode_grid(data)
+        ct = resp.headers.get("content-type", self._content_type)
+        grid = decode_request(data, ct)
         if grid.is_error:
             raise CallError(grid.meta.get("dis", "Unknown error"), grid)
         return grid

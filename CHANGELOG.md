@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-02-24
+
+### Added
+
+- **WebSocket binary compression**: Codec-level zlib and LZMA compression for binary frames via `FLAG_COMPRESSED` (v2 frame format). Configurable per-connection through capabilities negotiation.
+- **WebSocket chunked transfer**: Large binary payloads automatically split into 256 KB chunks via `FLAG_CHUNKED`, with `ChunkAssembler` for ordered reassembly. Reduces peak memory and enables streaming.
+- **WebSocket capabilities negotiation**: Client and server exchange supported features (compression algorithms, chunking) on connect, agreeing on the intersection.
+- **Watch push chunking**: `push_watch()` now chunks large watch payloads through `encode_chunked_frames` when chunking is enabled, consistent with the response path.
+- **`ReconnectingWebSocketClient` completeness**: Added 7 missing delegation methods: `batch`, `his_read_batch`, `his_write_batch`, `point_write`, `point_write_array`, `watch_close`, `close`.
+- **Batch handler metrics**: WS batch dispatch now fires `on_error` and `on_ws_message_sent` metrics callbacks.
+
+### Fixed
+
+- **WebSocket TEXT vs BINARY frame routing**: `HaystackWebSocket.recv()` now returns `str` for TEXT opcodes and `bytes` for BINARY, fixing silent capabilities negotiation failures where text-frame JSON was misrouted to the binary decoder.
+- **Server double-encoding on chunked responses**: Response path now encodes the grid payload once and checks raw size against `CHUNK_THRESHOLD`, instead of encoding twice or checking post-compression size.
+- **ChunkAssembler index validation**: Reassembly now validates that all expected chunk indices (0..N-1) are present, raising `ValueError` on gaps or duplicates instead of `KeyError`.
+- **Chunked frame guard**: Both server and client now log a warning and skip chunked frames when chunking is not enabled, preventing silent data corruption from chunk headers leaking into payload bytes.
+- **ChunkAssembler memory cleanup**: Periodic cleanup of orphaned chunk buffers (30s interval) wired into both server `_message_loop` and client `_recv_loop`, preventing unbounded memory growth from incomplete sequences.
+
+### Changed
+
+- **`decode_chunk_header` → `_decode_chunk_header`**: Internal function made private; not part of public API.
+- **`CHUNK_SIZE` and `CHUNK_THRESHOLD` exported**: Added to `ws_codec.__all__` for external use.
+- **`time` import moved to module level** in `ws_codec.py` (was lazy-imported inside `_ChunkBuffer.__init__`).
+- **Redundant `None` check removed** in `encode_chunked_frames` — `threshold=0` guarantees compression, replaced with assert.
+
 ## [0.1.9] - 2026-02-24
 
 ### Security

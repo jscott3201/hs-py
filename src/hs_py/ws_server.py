@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import hmac as hmac_mod
 import logging
+import time
 import weakref
 from typing import TYPE_CHECKING, Any
 
@@ -34,10 +35,17 @@ from hs_py.ops import HaystackOps, dispatch_op
 from hs_py.tls import TLSConfig, build_server_ssl_context
 from hs_py.ws import HaystackWebSocket, cancel_task, heartbeat_loop
 from hs_py.ws_codec import (
+    CHUNK_SIZE,
+    CHUNK_THRESHOLD,
+    FLAG_CHUNKED,
+    FLAG_ERROR,
     FLAG_PUSH,
+    FLAG_RESPONSE,
+    ChunkAssembler,
     decode_binary_frame,
     encode_binary_push,
     encode_binary_response,
+    encode_chunked_frames,
 )
 
 if TYPE_CHECKING:
@@ -107,6 +115,8 @@ class WebSocketServer:
         compression: bool = False,
         binary: bool = False,
         user_store: Any = None,
+        binary_compression: int | None = None,
+        chunked: bool = False,
     ) -> None:
         """Initialise the WebSocket server.
 
@@ -125,6 +135,9 @@ class WebSocketServer:
         :param compression: Enable per-message deflate compression.
         :param binary: Use binary frame encoding instead of JSON envelopes.
         :param user_store: Optional user store for role-based authorization checks.
+        :param binary_compression: Codec-level compression algorithm for binary frames
+            (e.g. ``COMP_ZLIB``).  ``None`` disables codec compression.
+        :param chunked: Enable chunked transfer for large binary payloads.
         """
         self._ops = ops
         self._auth_token = auth_token
@@ -137,6 +150,8 @@ class WebSocketServer:
         self._heartbeat = heartbeat
         self._metrics = metrics or MetricsHooks()
         self._compression = compression
+        self._binary_compression = binary_compression
+        self._chunked = chunked
         self._user_store = user_store
         self._server: asyncio.Server | None = None
         self._connections: weakref.WeakSet[HaystackWebSocket] = weakref.WeakSet()
@@ -190,7 +205,24 @@ class WebSocketServer:
         """
         connections = set(self._connections)
         if self._binary:
-            frame = encode_binary_push("watchPoll", grid)
+            # Check if chunking is needed for large push payloads
+            if self._chunked:
+                payload = encode_grid_json(grid)
+                if len(payload) > CHUNK_THRESHOLD:
+                    frames = encode_chunked_frames(
+                        FLAG_PUSH,
+                        0,
+                        "watchPoll",
+                        payload,
+                        compression=self._binary_compression,
+                        chunk_size=CHUNK_SIZE,
+                    )
+                    for ws in connections:
+                        with contextlib.suppress(Exception):
+                            for frame in frames:
+                                await ws.send_bytes(frame)
+                    return
+            frame = encode_binary_push("watchPoll", grid, compression=self._binary_compression)
             for ws in connections:
                 with contextlib.suppress(Exception):
                     await ws.send_bytes(frame)
@@ -462,18 +494,28 @@ class WebSocketServer:
 
     async def _message_loop(self, ws: HaystackWebSocket, username: str | None = None) -> None:
         """Read request messages and dispatch to HaystackOps."""
+        chunk_assembler = ChunkAssembler() if self._chunked else None
+        last_cleanup = time.monotonic()
         while True:
             data = await ws.recv()
             _fire(self._metrics.on_ws_message_recv, "", len(data))
 
-            # Binary frame handling
-            if self._binary and isinstance(data, bytes) and len(data) >= 4:
-                await self._handle_binary_message(ws, data, username)
+            # Periodic cleanup of orphaned chunk buffers
+            if chunk_assembler is not None:
+                now = time.monotonic()
+                if now - last_cleanup > 30.0:
+                    chunk_assembler.cleanup(now)
+                    last_cleanup = now
+
+            # Binary frame handling — only bytes from binary WS frames
+            if isinstance(data, bytes) and self._binary and len(data) >= 4:
+                await self._handle_binary_message(ws, data, username, chunk_assembler)
                 continue
 
             # JSON text handling
+            text = data if isinstance(data, str) else data.decode()
             try:
-                msg = orjson.loads(data)
+                msg = orjson.loads(text)
             except orjson.JSONDecodeError:
                 _log.warning("Non-JSON WebSocket message, ignoring")
                 continue
@@ -485,10 +527,55 @@ class WebSocketServer:
 
             await self._handle_json_message(ws, msg, username)
 
+    async def _handle_capabilities(self, ws: HaystackWebSocket, msg: dict[str, Any]) -> None:
+        """Respond to a capabilities negotiation message.
+
+        The client sends its supported features and the server responds
+        with the intersection of what it supports.
+        """
+        client_compression = msg.get("compression", [])
+        client_chunked = msg.get("chunked", False)
+
+        # Determine agreed compression algorithm
+        server_algos = []
+        if self._binary_compression is not None:
+            from hs_py.ws_codec import COMP_LZMA, COMP_ZLIB
+
+            algo_names = {COMP_ZLIB: "zlib", COMP_LZMA: "lzma"}
+            name = algo_names.get(self._binary_compression)
+            if name:
+                server_algos.append(name)
+
+        agreed_compression: str | None = None
+        for algo in client_compression:
+            if algo in server_algos:
+                agreed_compression = algo
+                break
+
+        agreed_chunked = client_chunked and self._chunked
+
+        response = {
+            "type": "capabilities",
+            "compression": agreed_compression,
+            "chunked": agreed_chunked,
+            "version": 2,
+        }
+        await ws.send_text_preencoded(orjson.dumps(response))
+        _log.debug(
+            "Capabilities negotiated: compression=%s chunked=%s",
+            agreed_compression,
+            agreed_chunked,
+        )
+
     async def _handle_json_message(
         self, ws: HaystackWebSocket, msg: dict[str, Any], username: str | None = None
     ) -> None:
         """Dispatch a single JSON request envelope."""
+        # Handle capabilities negotiation
+        if msg.get("type") == "capabilities":
+            await self._handle_capabilities(ws, msg)
+            return
+
         req_id = msg.get("id")
         op = msg.get("op", "")
         ch = msg.get("ch")
@@ -511,7 +598,11 @@ class WebSocketServer:
         _fire(self._metrics.on_ws_message_sent, op, len(payload))
 
     async def _handle_binary_message(
-        self, ws: HaystackWebSocket, data: bytes, username: str | None = None
+        self,
+        ws: HaystackWebSocket,
+        data: bytes,
+        username: str | None = None,
+        chunk_assembler: ChunkAssembler | None = None,
     ) -> None:
         """Dispatch a binary frame request."""
         try:
@@ -522,6 +613,16 @@ class WebSocketServer:
 
         if flags & FLAG_PUSH:
             return  # Server doesn't process inbound pushes
+
+        # Chunked frame — accumulate until complete
+        if flags & FLAG_CHUNKED:
+            if chunk_assembler is None:
+                _log.warning("Received chunked frame but chunking is not enabled, ignoring")
+                return
+            assembled = chunk_assembler.feed(flags, req_id, op, grid_bytes)
+            if assembled is None:
+                return  # waiting for more chunks
+            grid_bytes = assembled
 
         _fire(self._metrics.on_ws_message_recv, op, len(data))
 
@@ -539,9 +640,35 @@ class WebSocketServer:
             _fire(self._metrics.on_error, op, type(exc).__name__)
             result_grid = Grid.make_error("Internal server error")
 
-        response = encode_binary_response(req_id, op, result_grid, is_error=result_grid.is_error)
-        await ws.send_bytes(response)
-        _fire(self._metrics.on_ws_message_sent, op, len(response))
+        # Encode grid payload once, then decide: chunk or single frame
+        payload = encode_grid_json(result_grid)
+        resp_flags = FLAG_RESPONSE
+        if result_grid.is_error:
+            resp_flags |= FLAG_ERROR
+
+        # Chunk based on raw payload size (before compression)
+        if self._chunked and len(payload) > CHUNK_THRESHOLD:
+            frames = encode_chunked_frames(
+                resp_flags,
+                req_id,
+                op,
+                payload,
+                compression=self._binary_compression,
+                chunk_size=CHUNK_SIZE,
+            )
+            for frame in frames:
+                await ws.send_bytes(frame)
+            _fire(self._metrics.on_ws_message_sent, op, sum(len(f) for f in frames))
+        else:
+            response = encode_binary_response(
+                req_id,
+                op,
+                result_grid,
+                is_error=result_grid.is_error,
+                compression=self._binary_compression,
+            )
+            await ws.send_bytes(response)
+            _fire(self._metrics.on_ws_message_sent, op, len(response))
 
     async def _handle_batch(
         self, ws: HaystackWebSocket, batch: list[Any], username: str | None = None
@@ -561,9 +688,11 @@ class WebSocketServer:
                 await self._check_permission(username, r_op)
                 r_grid = await dispatch_op(self._ops, r_op, item)
             except HaystackError as exc:
+                _fire(self._metrics.on_error, r_op, type(exc).__name__)
                 r_grid = Grid.make_error(str(exc))
             except Exception:
                 _log.exception("Unhandled error in batch op '%s'", r_op)
+                _fire(self._metrics.on_error, r_op, "InternalError")
                 r_grid = Grid.make_error("Internal server error")
             grid_bytes = self._cached_grid_bytes(r_op, item, r_grid)
             return _ws_envelope(grid_bytes, r_id)
@@ -571,3 +700,4 @@ class WebSocketServer:
         item_bytes = await asyncio.gather(*[_dispatch_item(item) for item in items])
         payload = b"[" + b",".join(item_bytes) + b"]"
         await ws.send_text_preencoded(payload)
+        _fire(self._metrics.on_ws_message_sent, "batch", len(payload))

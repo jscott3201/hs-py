@@ -510,6 +510,57 @@ class TestScramNoTokenInFinal(AioHTTPTestCase):
             await authenticate(self.client.session, base_url, _TEST_USER, _TEST_PASS)
 
 
+class TestScramNoServerSignature(AioHTTPTestCase):
+    """Test SCRAM final with authToken but no server signature data."""
+
+    async def get_application(self) -> web.Application:
+        app = web.Application()
+        app["call"] = 0
+        app.router.add_get("/api/about", self._handle_about)
+        return app
+
+    async def _handle_about(self, request: web.Request) -> web.Response:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("HELLO"):
+            return web.Response(
+                status=401,
+                headers={"WWW-Authenticate": "SCRAM handshakeToken=tok1, hash=SHA-256"},
+            )
+        if auth.startswith("SCRAM"):
+            request.app["call"] += 1
+            if request.app["call"] == 1:
+                params = _parse_header_params(auth)
+                data = _b64url_decode(params.get("data", "")).decode()
+                client_first_bare = data[3:]
+                scram_params = _parse_scram_msg(client_first_bare)
+                c_nonce = scram_params["r"]
+                s_nonce = c_nonce + "server-nonce-abc"
+                salt_b64 = base64.b64encode(_TEST_SALT).decode()
+                server_first = f"r={s_nonce},s={salt_b64},i={_TEST_ITER}"
+                return web.Response(
+                    status=401,
+                    headers={
+                        "WWW-Authenticate": (
+                            f"SCRAM handshakeToken=tok2, hash=SHA-256, "
+                            f"data={_b64url_encode(server_first.encode())}"
+                        )
+                    },
+                )
+            # Step 2: return 200 with authToken but NO data (server signature)
+            return web.Response(
+                status=200,
+                headers={"Authentication-Info": "authToken=my-token"},
+                text="OK",
+            )
+        return web.Response(status=401)
+
+    async def test_no_server_signature(self) -> None:
+        """Cover auth.py L284: authToken present but server sig missing."""
+        base_url = f"http://localhost:{self.server.port}/api"
+        with pytest.raises(AuthError, match="Server signature missing"):
+            await authenticate(self.client.session, base_url, _TEST_USER, _TEST_PASS)
+
+
 class TestPlaintextAuthFailure(AioHTTPTestCase):
     """Test PLAINTEXT auth with bad credentials."""
 
@@ -634,3 +685,55 @@ class TestHashAlgo:
         """Cover auth.py L405: unsupported hash in _hash_algo."""
         with pytest.raises(AuthError, match="Unsupported"):
             _hash_algo("MD5")
+
+
+# ---- scram_client_final edge cases (auth.py L175-188) ----------------------
+
+
+class TestScramClientFinalValidation:
+    """Cover auth.py L175-176, L182, L184, L188: iteration/salt validation."""
+
+    def _first_and_server_msg(
+        self, *, iterations: int = 4096, salt: bytes = b"testsalt12345678"
+    ) -> tuple:
+        first = scram_client_first("user")
+        s_nonce = first.c_nonce + "servernonce"
+        salt_b64 = base64.b64encode(salt).decode()
+        server_first = f"r={s_nonce},s={salt_b64},i={iterations}"
+        return first, server_first
+
+    def test_invalid_iteration_count_raises(self) -> None:
+        """Cover auth.py L175-176: non-integer iteration count."""
+        first = scram_client_first("user")
+        s_nonce = first.c_nonce + "servernonce"
+        salt_b64 = base64.b64encode(b"testsalt12345678").decode()
+        server_first = f"r={s_nonce},s={salt_b64},i=notanumber"
+        with pytest.raises(AuthError, match="Invalid SCRAM iteration count"):
+            scram_client_final("pass", first, server_first)
+
+    def test_excessive_iterations_raises(self) -> None:
+        """Cover auth.py L182: iterations > _MAX_SCRAM_ITERATIONS."""
+        first, server_first = self._first_and_server_msg(iterations=2_000_000)
+        with pytest.raises(AuthError, match="excessive"):
+            scram_client_final("pass", first, server_first)
+
+    def test_insufficient_iterations_raises(self) -> None:
+        """Cover auth.py L184: iterations < _MIN_SCRAM_ITERATIONS."""
+        first, server_first = self._first_and_server_msg(iterations=100)
+        with pytest.raises(AuthError, match="insufficient"):
+            scram_client_final("pass", first, server_first)
+
+    def test_short_salt_raises(self) -> None:
+        """Cover auth.py L188: salt < _MIN_SALT_BYTES."""
+        first, server_first = self._first_and_server_msg(salt=b"short")
+        with pytest.raises(AuthError, match="insufficient salt"):
+            scram_client_final("pass", first, server_first)
+
+
+class TestParseScramMsgBranch:
+    """Cover auth.py L371: _parse_scram_msg with parts lacking '='."""
+
+    def test_parts_without_equals(self) -> None:
+        result = _parse_scram_msg("noequals,r=nonce,alsono")
+        assert result == {"r": "nonce"}
+        assert "noequals" not in result

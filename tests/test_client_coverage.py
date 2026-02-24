@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from typing import Any
 
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase
 
@@ -482,3 +483,124 @@ class TestNetworkError(AioHTTPTestCase):
             raise AssertionError("should raise NetworkError")
         except NetworkError:
             pass
+
+
+# ---- 406/415 response handling ---------------------------------------------
+
+
+class TestClient406Response(AioHTTPTestCase):
+    async def get_application(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/api/about", self._handle_406)
+        app.router.add_get("/api/close", self._handle_close)
+        return app
+
+    async def _handle_406(self, _request: web.Request) -> web.Response:
+        return web.Response(status=406, text="Not Acceptable")
+
+    async def _handle_close(self, _request: web.Request) -> web.Response:
+        return _json_response(Grid.make_empty())
+
+    async def test_406_raises_call_error(self) -> None:
+        """Cover client.py L587: 406 → CallError."""
+        from hs_py.errors import CallError
+
+        base_url = f"http://localhost:{self.server.port}/api"
+        c = Client(base_url, pythonic=False)
+        c._session = self.client.session
+        c._auth_token = ""
+        with pytest.raises(CallError, match="Accept format"):
+            await c._call_get("about")
+
+
+class TestClient415Response(AioHTTPTestCase):
+    async def get_application(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/api/about", self._handle_415)
+        app.router.add_get("/api/close", self._handle_close)
+        return app
+
+    async def _handle_415(self, _request: web.Request) -> web.Response:
+        return web.Response(status=415, text="Unsupported Media Type")
+
+    async def _handle_close(self, _request: web.Request) -> web.Response:
+        return _json_response(Grid.make_empty())
+
+    async def test_415_raises_call_error(self) -> None:
+        """Cover client.py L589: 415 → CallError."""
+        from hs_py.errors import CallError
+
+        base_url = f"http://localhost:{self.server.port}/api"
+        c = Client(base_url, pythonic=False)
+        c._session = self.client.session
+        c._auth_token = ""
+        with pytest.raises(CallError, match="Content-Type"):
+            await c._call_get("about")
+
+
+# ---- Client accept_format --------------------------------------------------
+
+
+class TestClientZincFormat(AioHTTPTestCase):
+    """Cover client.py: accept_format='zinc' sets headers and encode/decode."""
+
+    async def get_application(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/api/about", self._handle_about)
+        app.router.add_post("/api/read", self._handle_read)
+        app.router.add_get("/api/close", self._handle_close)
+        return app
+
+    async def _handle_about(self, request: web.Request) -> web.Response:
+        assert "text/zinc" in request.headers.get("Accept", "")
+        from hs_py.encoding.zinc import encode_grid as zinc_encode
+
+        grid = Grid.make_rows([{"serverName": "ZincServer"}])
+        return web.Response(body=zinc_encode(grid), content_type="text/zinc")
+
+    async def _handle_read(self, request: web.Request) -> web.Response:
+        assert "text/zinc" in request.headers.get("Content-Type", "")
+        assert "text/zinc" in request.headers.get("Accept", "")
+        from hs_py.encoding.zinc import encode_grid as zinc_encode
+
+        grid = Grid.make_rows([{"id": Ref("p1"), "dis": "Point"}])
+        return web.Response(body=zinc_encode(grid), content_type="text/zinc")
+
+    async def _handle_close(self, _request: web.Request) -> web.Response:
+        return web.Response(body=b"", content_type="text/zinc")
+
+    async def test_zinc_about(self) -> None:
+        base_url = f"http://localhost:{self.server.port}/api"
+        c = Client(base_url, pythonic=False, accept_format="zinc")
+        c._session = self.client.session
+        c._auth_token = ""
+        grid = await c.about()
+        assert grid[0]["serverName"] == "ZincServer"
+
+    async def test_zinc_post(self) -> None:
+        base_url = f"http://localhost:{self.server.port}/api"
+        c = Client(base_url, pythonic=False, accept_format="zinc")
+        c._session = self.client.session
+        c._auth_token = ""
+        grid = await c.read("point")
+        assert len(grid) == 1
+
+
+# ---- Client with TLS config -----------------------------------------------
+
+
+class TestClientTLSConnector:
+    """Cover client.py L91-92: TLS connector creation."""
+
+    async def test_tls_connector_created(self) -> None:
+        from unittest.mock import patch
+
+        from hs_py.tls import TLSConfig
+
+        tls_config = TLSConfig()
+        c = Client("https://host/api", tls=tls_config)
+        with patch("hs_py.client.build_client_ssl_context") as mock_ssl:
+            mock_ssl.return_value = None  # aiohttp accepts None for ssl
+            async with c:
+                assert c._session is not None
+            await c.close()
