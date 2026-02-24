@@ -1,7 +1,7 @@
 Security
 ========
 
-Authentication, TLS, and the FastAPI server framework.
+Authentication, TLS, user management, and the FastAPI server framework.
 
 Authentication
 --------------
@@ -18,6 +18,22 @@ Auth Types
 Authentication protocol interfaces and credential backends.
 
 .. automodule:: hs_py.auth_types
+   :members:
+
+Users & Roles
+-------------
+
+User model, role-based permissions, and user creation helpers.
+
+.. automodule:: hs_py.user
+   :members:
+
+Bootstrap
+---------
+
+Admin user bootstrap on server startup.
+
+.. automodule:: hs_py.bootstrap
    :members:
 
 TLS

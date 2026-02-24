@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from hs_py.filter import evaluate
 from hs_py.kinds import Number, Ref
+from hs_py.user import User, derive_scram_credentials
 
 if TYPE_CHECKING:
     from hs_py.filter.ast import Node
@@ -59,6 +60,8 @@ class InMemoryAdapter:
         self._priority: dict[str, dict[int, Any]] = {}
         # watch_id -> _WatchState
         self._watches: dict[str, _WatchState] = {}
+        # username -> User
+        self._users: dict[str, User] = {}
 
         if entities:
             self.load_entities(entities)
@@ -336,3 +339,61 @@ class InMemoryAdapter:
         for state in self._watches.values():
             if ref_val in state.ids:
                 state.dirty.add(ref_val)
+
+    # ---- UserStore implementation --------------------------------------------
+
+    async def get_user(self, username: str) -> User | None:
+        """Return a user by username, or ``None`` if not found."""
+        return self._users.get(username)
+
+    async def list_users(self) -> list[User]:
+        """Return all users."""
+        return list(self._users.values())
+
+    async def create_user(self, user: User) -> None:
+        """Persist a new user.
+
+        :raises ValueError: If a user with the same username already exists.
+        """
+        if user.username in self._users:
+            msg = f"User already exists: {user.username!r}"
+            raise ValueError(msg)
+        self._users[user.username] = user
+
+    async def update_user(self, username: str, **fields: Any) -> User:
+        """Update fields on an existing user.
+
+        :raises KeyError: If the user does not exist.
+        """
+        existing = self._users.get(username)
+        if existing is None:
+            msg = f"User not found: {username!r}"
+            raise KeyError(msg)
+
+        import time
+
+        updates: dict[str, Any] = {"updated_at": time.time()}
+        if "password" in fields:
+            updates["credentials"] = derive_scram_credentials(fields.pop("password"))
+
+        allowed = {"first_name", "last_name", "email", "role", "enabled", "credentials"}
+        for key, val in fields.items():
+            if key in allowed:
+                updates[key] = val
+
+        from dataclasses import asdict
+
+        merged = {**asdict(existing), **updates}
+        merged["credentials"] = updates.get("credentials", existing.credentials)
+        # asdict() converts Role enum to its value — restore the enum instance
+        if isinstance(merged.get("role"), str):
+            from hs_py.user import Role
+
+            merged["role"] = Role(merged["role"])
+        new_user = User(**merged)
+        self._users[username] = new_user
+        return new_user
+
+    async def delete_user(self, username: str) -> bool:
+        """Delete a user by username."""
+        return self._users.pop(username, None) is not None

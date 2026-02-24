@@ -1,6 +1,11 @@
 WebSocket
 =========
 
+.. warning::
+
+   The WebSocket transport API is **experimental** and subject to breaking
+   changes in future releases.
+
 WebSocket-based Haystack transport with sans-I/O protocol, async client,
 and server implementations.
 

@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/jscott3201/hs-py)](LICENSE)
 [![CI](https://github.com/jscott3201/hs-py/actions/workflows/ci.yml/badge.svg)](https://github.com/jscott3201/hs-py/actions/workflows/ci.yml)
 
-Asynchronous [Project Haystack](https://project-haystack.org/) client and server library for Python 3.13+. HTTP and WebSocket transports, four wire formats, SCRAM-SHA-256 and mTLS authentication, pluggable storage backends (Redis, TimescaleDB), and full ontology support. Built on native `asyncio`.
+Asynchronous [Project Haystack](https://project-haystack.org/) client and server library for Python 3.13+. HTTP and WebSocket transports, four wire formats, SCRAM-SHA-256 and mTLS authentication, role-based access control (Admin/Operator/Viewer), user management with CRUD API, pluggable storage backends (Redis, TimescaleDB), and full ontology support. Built on native `asyncio`.
 
 [Documentation](https://jscott3201.github.io/hs-py/) | [Getting Started](https://jscott3201.github.io/hs-py/getting-started.html) | [API Reference](https://jscott3201.github.io/hs-py/api/index.html) | [Changelog](CHANGELOG.md)
 
@@ -22,6 +22,7 @@ async with Client("http://server/api", "admin", "secret") as c:
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Authentication, Users & Permissions](#authentication-users--permissions)
 - [Storage Backends](#storage-backends)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -37,13 +38,14 @@ async with Client("http://server/api", "admin", "secret") as c:
 | **Client** | `Client` (HTTP) and `WebSocketClient` with all 13 standard ops, batch requests, watch subscriptions, auto-auth |
 | **Server** | FastAPI application factory, SCRAM-SHA-256 middleware, content negotiation (JSON/Zinc/Trio/CSV), standalone `WebSocketServer` |
 | **Wire Formats** | JSON v3/v4 (`orjson`), Zinc (text), Trio (tagged records), CSV (export-only) |
-| **Authentication** | SCRAM-SHA-256 over HTTP and WebSocket, PLAINTEXT fallback, token-based WebSocket auth, mTLS with `CertAuthenticator` |
+| **Authentication** | SCRAM-SHA-256 over HTTP and WebSocket, PLAINTEXT fallback, token-based WebSocket auth, mTLS with `CertAuthenticator`, `StorageAuthenticator` for DB-backed credentials |
 | **TLS** | TLS 1.3 enforced, mutual authentication, test certificate generation (EC P-256), `TLSConfig` dataclass |
-| **Storage** | Pluggable `StorageAdapter` protocol with Redis (RediSearch + RedisTimeSeries), TimescaleDB (asyncpg + JSONB), and in-memory backends |
+| **Users & Permissions** | `User` model with SCRAM credentials, `Role` enum (Admin/Operator/Viewer), CRUD REST API, `UserStore` protocol, admin bootstrap from env vars |
+| **Storage** | Pluggable `StorageAdapter` + `UserStore` protocols with Redis (RediSearch + RedisTimeSeries), TimescaleDB (asyncpg + JSONB), and in-memory backends |
 | **Data Model** | All Haystack value types as frozen dataclasses, `Grid` / `GridBuilder` as universal message format |
 | **Filters** | Recursive descent parser, AST representation, evaluation against dicts and grids, SQL pushdown for JSONB/RediSearch |
 | **Ontology** | Def/Lib/Namespace model, taxonomy queries, tag normalization, dict-to-def reflection |
-| **WebSocket Extras** | `ReconnectingWebSocketClient` with backoff, `WebSocketPool` / `ChannelClient` multiplexing, binary frame codec |
+| **WebSocket Extras** ⚠️ | `ReconnectingWebSocketClient` with backoff, `WebSocketPool` / `ChannelClient` multiplexing, binary frame codec *(experimental — API subject to change)* |
 | **Observability** | `MetricsHooks` for connection, message, request, and error callbacks |
 | **Watch** | Server-side `WatchState` delta encoding, client-side `WatchAccumulator` delta merging |
 | **Quality** | 1,200+ tests, 69 end-to-end integration tests, 122 TimescaleDB tests, mypy strict, ruff linting, frozen dataclasses throughout |
@@ -112,6 +114,8 @@ asyncio.run(main())
 
 ### WebSocket Client
 
+> **⚠️ Experimental:** The WebSocket transport API is experimental and subject to breaking changes in future releases.
+
 ```python
 import asyncio
 from hs_py import WebSocketClient, Grid, Ref
@@ -142,23 +146,31 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from hs_py.ops import HaystackOps
-from hs_py.storage.memory import MemoryAdapter
-from hs_py.auth_types import SimpleAuthenticator
-from hs_py.fastapi_server import create_app
+from hs_py import MARKER, Ref
+from hs_py.storage.memory import InMemoryAdapter
+from hs_py.auth_types import StorageAuthenticator
+from hs_py.fastapi_server import create_fastapi_app
+from hs_py.user import Role, create_user
 import uvicorn
 
 
 async def main():
-    storage = MemoryAdapter()
+    storage = InMemoryAdapter()
     await storage.start()
     await storage.load_entities([
         {"id": Ref("s1"), "site": MARKER, "dis": "My Building"},
     ])
 
-    ops = HaystackOps(storage=storage)
-    auth = SimpleAuthenticator({"admin": "secret"})
-    app = create_app(ops, authenticator=auth)
+    # Create an admin user and wire storage-backed auth
+    admin = create_user("admin", "secret", role=Role.ADMIN)
+    await storage.create_user(admin)
+    auth = StorageAuthenticator(storage)
+
+    app = create_fastapi_app(
+        storage=storage,
+        authenticator=auth,
+        user_store=storage,
+    )
     config = uvicorn.Config(app, host="0.0.0.0", port=8080)
     server = uvicorn.Server(config)
     await server.serve()
@@ -222,9 +234,75 @@ subtypes = ns.subtypes("equip")  # [ahu, vav, ...]
 defs = reflect(ns, entity_dict)
 ```
 
+## Authentication, Users & Permissions
+
+### User Model
+
+Users are managed via frozen `User` dataclasses with SCRAM-SHA-256 credentials (passwords are never stored). Each user has a `Role` that controls access:
+
+| Role | Level | Capabilities |
+|------|-------|-------------|
+| **Admin** | Full | User management, all read/write Haystack ops |
+| **Operator** | Read + Write | hisWrite, pointWrite, invokeAction, watches, plus all read ops |
+| **Viewer** | Read-only | read, nav, hisRead, defs, libs, filetypes |
+
+```python
+from hs_py.user import Role, create_user
+
+# Create users with specific roles
+admin = create_user("admin", "secret", role=Role.ADMIN)
+operator = create_user("operator", "pass", role=Role.OPERATOR)
+viewer = create_user("viewer", "pass", role=Role.VIEWER, email="viewer@example.com")
+```
+
+### Storage-Backed Authentication
+
+`StorageAuthenticator` reads SCRAM credentials from any `UserStore` backend (InMemory, Redis, or TimescaleDB). Disabled users are automatically denied authentication.
+
+```python
+from hs_py.auth_types import StorageAuthenticator
+from hs_py.storage.memory import InMemoryAdapter
+
+storage = InMemoryAdapter()
+auth = StorageAuthenticator(storage)
+app = create_fastapi_app(storage=storage, authenticator=auth, user_store=storage)
+```
+
+### Admin Bootstrap
+
+On startup, the server verifies at least one enabled Admin user exists. If none is found, it seeds one from environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `HS_SUPERUSER_USERNAME` | Username for the seeded admin account |
+| `HS_SUPERUSER_PASSWORD` | Password for the seeded admin account |
+
+If neither an admin user nor environment variables are provided, the server exits with an error.
+
+### User Management API
+
+Admin users can manage users via REST endpoints:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/users/` | Create a user (with `role`, `username`, `password`) |
+| `GET` | `/api/users/` | List all users |
+| `GET` | `/api/users/{username}` | Get a single user |
+| `PUT` | `/api/users/{username}` | Update user fields (password, role, enabled, etc.) |
+| `DELETE` | `/api/users/{username}` | Delete a user (cannot self-delete) |
+
+### Permission Enforcement
+
+Roles are enforced on all Haystack operations:
+
+- **Write ops** (hisWrite, pointWrite, invokeAction, watchSub/Unsub/Poll) require **Operator** or **Admin** role.
+- **Read ops** (read, nav, hisRead, defs, libs, filetypes) and **GET ops** (about, ops, formats) are available to all authenticated users.
+- **User management** endpoints require **Admin** role.
+- Enforcement applies to both HTTP and WebSocket transports.
+
 ## Storage Backends
 
-haystack-py defines a `StorageAdapter` protocol that decouples server operations from data storage. Three implementations are provided:
+haystack-py defines `StorageAdapter` and `UserStore` protocols that decouple server operations from data storage. Three implementations are provided, each supporting both entity storage and user management:
 
 | Backend | Module | Best For |
 |---------|--------|----------|
@@ -264,10 +342,12 @@ src/hs_py/
   grid.py             Grid, Col, GridBuilder -- universal message format
   errors.py           Exception hierarchy (HaystackError, CallError, AuthError)
   auth.py             SCRAM-SHA-256 / PLAINTEXT client auth handshake
-  auth_types.py       Authenticator protocol, SimpleAuthenticator, CertAuthenticator
+  auth_types.py       Authenticator protocol, SimpleAuthenticator, CertAuthenticator, StorageAuthenticator
+  user.py             User model, Role enum, create_user(), SCRAM credential derivation
+  bootstrap.py        Admin user bootstrap from env vars on startup
   client.py           Async HTTP client with all standard ops
   ops.py              HaystackOps base class with storage-backed op dispatch
-  fastapi_server.py   FastAPI application factory, SCRAM middleware, WebSocket endpoint
+  fastapi_server.py   FastAPI application factory, SCRAM middleware, user CRUD API, role enforcement
   metrics.py          MetricsHooks for transport-level observability
   tls.py              TLSConfig, SSL context builders, certificate generation
   security.py         Security hardening utilities
@@ -288,7 +368,7 @@ src/hs_py/
     parser.py         Recursive descent parser
     eval.py           Filter evaluation against dicts/grids
   storage/
-    protocol.py       StorageAdapter protocol (11 async methods)
+    protocol.py       StorageAdapter + UserStore protocols
     memory.py         In-memory adapter for testing
     redis.py          Redis + RediSearch + RedisTimeSeries adapter
     timescale.py      PostgreSQL/TimescaleDB adapter via asyncpg
@@ -313,6 +393,10 @@ src/hs_py/
 | `Grid` | `grid` | Universal Haystack message format (immutable) |
 | `GridBuilder` | `grid` | Fluent builder for constructing grids |
 | `StorageAdapter` | `storage.protocol` | Protocol for pluggable storage backends |
+| `UserStore` | `storage.protocol` | Protocol for user management backends |
+| `User` | `user` | Frozen user record with SCRAM credentials and role |
+| `Role` | `user` | Permission enum: ADMIN, OPERATOR, VIEWER |
+| `StorageAuthenticator` | `auth_types` | SCRAM authenticator backed by a UserStore |
 | `TLSConfig` | `tls` | TLS certificate configuration |
 | `MetricsHooks` | `metrics` | Optional observability callbacks |
 | `WatchState` | `watch` | Server-side watch delta computation |
@@ -356,8 +440,10 @@ Environment variables for the server:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL |
-| `HAYSTACK_USER` | `admin` | SCRAM username |
-| `HAYSTACK_PASS` | `secret` | SCRAM password |
+| `HAYSTACK_USER` | `admin` | SCRAM username (legacy SimpleAuthenticator) |
+| `HAYSTACK_PASS` | `secret` | SCRAM password (legacy SimpleAuthenticator) |
+| `HS_SUPERUSER_USERNAME` | — | Admin username for bootstrap seeding |
+| `HS_SUPERUSER_PASSWORD` | — | Admin password for bootstrap seeding |
 
 ### Seed Data
 

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     from hs_py.auth_types import Authenticator
     from hs_py.ontology.namespace import Namespace
-    from hs_py.storage.protocol import StorageAdapter
+    from hs_py.storage.protocol import StorageAdapter, UserStore
 
 __all__ = [
     "ScramAuthMiddleware",
@@ -122,6 +122,14 @@ class ScramAuthMiddleware(BaseHTTPMiddleware):
                     headers=bearer_result.headers,
                     content=bearer_result.body,
                 )
+            # Attach authenticated username to request state
+            params = dict(
+                p.split("=", 1) for p in auth_header.split(None, 1)[1].split(",") if "=" in p
+            )
+            token = params.get("authToken", "").strip()
+            entry = self._tokens.get(token)
+            if entry is not None:
+                request.state.username = entry.username
             response: StarletteResponse = await call_next(request)
             return response
 
@@ -191,9 +199,48 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     storage = getattr(app.state, "storage", None)
     if storage is not None:
         await storage.start()
+    # Bootstrap superuser if a user store is available
+    user_store: UserStore | None = getattr(app.state, "user_store", None)
+    if user_store is not None:
+        from hs_py.bootstrap import ensure_superuser
+
+        await ensure_superuser(user_store)
     yield
     if storage is not None:
         await storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Role-based access control helpers
+# ---------------------------------------------------------------------------
+
+
+async def _check_op_permission(request: Request, op_name: str) -> None:
+    """Verify the authenticated user has permission for the given op.
+
+    Raises :class:`~hs_py.errors.HaystackError` if the user lacks the
+    required role.  When no ``user_store`` is configured on the app,
+    permission checks are skipped (open access).
+
+    :param request: The incoming HTTP request.
+    :param op_name: The Haystack op name (e.g. ``"hisWrite"``).
+    """
+    user_store: UserStore | None = getattr(request.app.state, "user_store", None)
+    if user_store is None:
+        return  # No user store → no role enforcement
+
+    from hs_py.user import WRITE_OPS, Role
+
+    username: str | None = getattr(request.state, "username", None)
+    if username is None:
+        raise HaystackError("Authentication required")
+
+    user = await user_store.get_user(username)
+    if user is None or not user.enabled:
+        raise HaystackError("Authentication required")
+
+    if op_name in WRITE_OPS and user.role < Role.OPERATOR:
+        raise HaystackError(f"Insufficient permissions: {op_name} requires operator or admin role")
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +279,7 @@ def _make_post_handler(op_name: str, method_name: str) -> Any:
     """
 
     async def handler(request: Request) -> Response:
+        await _check_op_permission(request, op_name)
         ops = _get_ops(request)
         req_grid = await _parse_grid(request)
         method = getattr(ops, method_name)
@@ -247,11 +295,36 @@ def _make_post_handler(op_name: str, method_name: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def _handle_ws_single(websocket: WebSocket, ops: HaystackOps, msg: dict[str, Any]) -> None:
+async def _check_ws_op_permission(app: FastAPI, username: str | None, op_name: str) -> None:
+    """Check role permissions for a WebSocket op.
+
+    :raises HaystackError: If the user lacks the required role.
+    """
+    user_store: UserStore | None = getattr(app.state, "user_store", None)
+    if user_store is None:
+        return
+
+    from hs_py.user import WRITE_OPS, Role
+
+    if username is None:
+        raise HaystackError("Authentication required")
+
+    user = await user_store.get_user(username)
+    if user is None or not user.enabled:
+        raise HaystackError("Authentication required")
+
+    if op_name in WRITE_OPS and user.role < Role.OPERATOR:
+        raise HaystackError(f"Insufficient permissions: {op_name} requires operator or admin role")
+
+
+async def _handle_ws_single(
+    websocket: WebSocket, ops: HaystackOps, msg: dict[str, Any], username: str | None = None
+) -> None:
     """Dispatch a single WS message and send the response."""
     req_id = msg.get("id")
     op = msg.get("op", "")
     try:
+        await _check_ws_op_permission(websocket.app, username, op)
         result_grid = await dispatch_op(ops, op, msg)
     except HaystackError as exc:
         result_grid = Grid.make_error(str(exc))
@@ -265,7 +338,9 @@ async def _handle_ws_single(websocket: WebSocket, ops: HaystackOps, msg: dict[st
     await websocket.send_text(orjson.dumps(response).decode())
 
 
-async def _handle_ws_batch(websocket: WebSocket, ops: HaystackOps, batch: list[Any]) -> None:
+async def _handle_ws_batch(
+    websocket: WebSocket, ops: HaystackOps, batch: list[Any], username: str | None = None
+) -> None:
     """Dispatch all ops in a batch concurrently, then send array response."""
     items = [item for item in batch if isinstance(item, dict)]
     if not items:
@@ -275,6 +350,7 @@ async def _handle_ws_batch(websocket: WebSocket, ops: HaystackOps, batch: list[A
         r_id = item.get("id")
         r_op = item.get("op", "")
         try:
+            await _check_ws_op_permission(websocket.app, username, r_op)
             r_grid = await dispatch_op(ops, r_op, item)
         except HaystackError as exc:
             r_grid = Grid.make_error(str(exc))
@@ -345,9 +421,12 @@ def _build_router() -> APIRouter:
                 if entry is None or (time.monotonic() - entry.created) > TOKEN_LIFETIME:
                     await websocket.close(code=4003, reason="Authentication required")
                     return
+                ws_username: str | None = entry.username
             except Exception:
                 await websocket.close(code=4003, reason="Authentication required")
                 return
+        else:
+            ws_username = None
 
         try:
             while True:
@@ -360,14 +439,14 @@ def _build_router() -> APIRouter:
 
                 # Batch: JSON array of envelopes — dispatch all ops concurrently
                 if isinstance(msg, list):
-                    task = asyncio.create_task(_handle_ws_batch(websocket, ops, msg))
+                    task = asyncio.create_task(_handle_ws_batch(websocket, ops, msg, ws_username))
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
                     continue
 
                 # Single message — fire-and-forget via create_task
                 if isinstance(msg, dict):
-                    task = asyncio.create_task(_handle_ws_single(websocket, ops, msg))
+                    task = asyncio.create_task(_handle_ws_single(websocket, ops, msg, ws_username))
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
 
@@ -395,6 +474,164 @@ def _build_router() -> APIRouter:
 
 
 # ---------------------------------------------------------------------------
+# User management endpoints
+# ---------------------------------------------------------------------------
+
+
+def _build_user_router(user_store: UserStore) -> APIRouter:
+    """Build an APIRouter with user management CRUD endpoints."""
+    from starlette.responses import JSONResponse
+
+    from hs_py.user import Role
+
+    router = APIRouter(prefix="/users", tags=["users"])
+
+    async def _require_admin(request: Request) -> str:
+        """Extract authenticated username and verify admin role.
+
+        :returns: The authenticated username.
+        :raises HaystackError: If not authenticated or not an admin.
+        """
+        username: str | None = getattr(request.state, "username", None)
+        if username is None:
+            raise HaystackError("Authentication required")
+        user = await user_store.get_user(username)
+        if user is None or user.role != Role.ADMIN:
+            raise HaystackError("Admin access required")
+        return username
+
+    def _user_response(user: Any) -> dict[str, Any]:
+        """Convert a User to a JSON-safe dict (no credentials)."""
+        return {
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "role": user.role.value,
+            "enabled": user.enabled,
+            "created_at": user.created_at,
+            "updated_at": user.updated_at,
+        }
+
+    @router.get("/")
+    async def list_users(request: Request) -> JSONResponse:
+        """List all users (admin-only)."""
+        await _require_admin(request)
+        users = await user_store.list_users()
+        return JSONResponse([_user_response(u) for u in users])
+
+    @router.get("/{username}")
+    async def get_user(request: Request, username: str) -> JSONResponse:
+        """Get a single user by username (admin-only)."""
+        await _require_admin(request)
+        user = await user_store.get_user(username)
+        if user is None:
+            return JSONResponse({"error": f"User not found: {username!r}"}, status_code=404)
+        return JSONResponse(_user_response(user))
+
+    @router.post("/")
+    async def create_user_endpoint(request: Request) -> JSONResponse:
+        """Create a new user (admin-only).
+
+        Request body (JSON)::
+
+            {
+                "username": "alice",
+                "password": "secret",
+                "first_name": "Alice",
+                "last_name": "Smith",
+                "email": "alice@example.com",
+                "role": "operator",
+            }
+        """
+        await _require_admin(request)
+        body = await request.json()
+        username = body.get("username", "").strip()
+        password = body.get("password", "").strip()
+        if not username or not password:
+            return JSONResponse({"error": "username and password are required"}, status_code=400)
+
+        from hs_py.user import create_user as _create_user
+
+        role_str = body.get("role", "viewer")
+        try:
+            role = Role(role_str)
+        except ValueError:
+            return JSONResponse(
+                {"error": f"Invalid role: {role_str!r}. Must be admin, operator, or viewer"},
+                status_code=400,
+            )
+
+        try:
+            user = _create_user(
+                username=username,
+                password=password,
+                first_name=body.get("first_name", ""),
+                last_name=body.get("last_name", ""),
+                email=body.get("email", ""),
+                role=role,
+                enabled=body.get("enabled", True),
+            )
+            await user_store.create_user(user)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse(_user_response(user), status_code=201)
+
+    @router.put("/{username}")
+    async def update_user_endpoint(request: Request, username: str) -> JSONResponse:
+        """Update an existing user (admin-only).
+
+        Request body (JSON) — all fields optional::
+
+            {
+                "password": "new-secret",
+                "first_name": "Alice",
+                "last_name": "Jones",
+                "email": "alice@newdomain.com",
+                "role": "admin",
+                "enabled": false,
+            }
+        """
+        await _require_admin(request)
+        body = await request.json()
+
+        # Convert role string to Role enum before passing to storage
+        if "role" in body:
+            role_str = body["role"]
+            try:
+                body["role"] = Role(role_str)
+            except ValueError:
+                return JSONResponse(
+                    {"error": f"Invalid role: {role_str!r}. Must be admin, operator, or viewer"},
+                    status_code=400,
+                )
+
+        allowed = {"password", "first_name", "last_name", "email", "role", "enabled"}
+        fields = {k: v for k, v in body.items() if k in allowed}
+        if not fields:
+            return JSONResponse({"error": "No valid fields to update"}, status_code=400)
+
+        try:
+            updated = await user_store.update_user(username, **fields)
+        except KeyError:
+            return JSONResponse({"error": f"User not found: {username!r}"}, status_code=404)
+        return JSONResponse(_user_response(updated))
+
+    @router.delete("/{username}")
+    async def delete_user_endpoint(request: Request, username: str) -> JSONResponse:
+        """Delete a user (admin-only)."""
+        caller = await _require_admin(request)
+        if username == caller:
+            return JSONResponse({"error": "Cannot delete your own account"}, status_code=400)
+        deleted = await user_store.delete_user(username)
+        if not deleted:
+            return JSONResponse({"error": f"User not found: {username!r}"}, status_code=404)
+        return JSONResponse({"deleted": username})
+
+    return router
+
+
+# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
@@ -405,6 +642,7 @@ def create_fastapi_app(
     storage: StorageAdapter | None = None,
     authenticator: Authenticator | None = None,
     namespace: Namespace | None = None,
+    user_store: UserStore | None = None,
     prefix: str = "/api",
 ) -> FastAPI:
     """Create a FastAPI application with Haystack HTTP routes.
@@ -423,6 +661,9 @@ def create_fastapi_app(
         SCRAM-SHA-256 auth.  When *None*, all requests are accepted without auth.
     :param namespace: Optional :class:`~hs_py.ontology.namespace.Namespace` for
         ``defs`` and ``libs`` operations.
+    :param user_store: Optional :class:`~hs_py.storage.protocol.UserStore` for
+        user management.  When provided, user CRUD endpoints are mounted under
+        ``{prefix}/users/`` and superuser bootstrapping runs at startup.
     :param prefix: URL path prefix for all Haystack routes (default ``"/api"``).
     :returns: Configured :class:`fastapi.FastAPI` application.
 
@@ -430,11 +671,11 @@ def create_fastapi_app(
 
         from hs_py.fastapi_server import create_fastapi_app
         from hs_py.storage.memory import InMemoryAdapter
-        from hs_py.auth_types import SimpleAuthenticator
+        from hs_py.auth_types import StorageAuthenticator
 
         storage = InMemoryAdapter()
-        auth = SimpleAuthenticator({"admin": "secret"})
-        app = create_fastapi_app(storage=storage, authenticator=auth)
+        auth = StorageAuthenticator(storage)
+        app = create_fastapi_app(storage=storage, authenticator=auth, user_store=storage)
         # uvicorn.run(app, host="0.0.0.0", port=8080)
     """
     if ops is None:
@@ -443,6 +684,7 @@ def create_fastapi_app(
     app = FastAPI(title="Haystack Server", lifespan=_lifespan)
     app.state.ops = ops
     app.state.storage = storage
+    app.state.user_store = user_store
 
     if authenticator is not None:
         app.add_middleware(ScramAuthMiddleware, authenticator=authenticator)
@@ -473,5 +715,8 @@ def create_fastapi_app(
 
     prefix = prefix.rstrip("/")
     app.include_router(_build_router(), prefix=prefix)
+
+    if user_store is not None:
+        app.include_router(_build_user_router(user_store), prefix=prefix)
 
     return app

@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from hs_py.auth import _derive_key, _hash_digest, _hmac
 from hs_py.tls import extract_peer_cn
+
+if TYPE_CHECKING:
+    from hs_py.storage.protocol import UserStore
 
 __all__ = [
     "Authenticator",
     "CertAuthenticator",
     "ScramCredentials",
     "SimpleAuthenticator",
+    "StorageAuthenticator",
 ]
 
 
@@ -105,3 +109,30 @@ class CertAuthenticator:
         if cn is not None and cn in self._allowed_cns:
             return cn
         return None
+
+
+class StorageAuthenticator:
+    """Authenticator that reads SCRAM credentials from a :class:`UserStore`.
+
+    Returns ``None`` for disabled or missing users, preventing login.
+
+    :param user_store: The user store to read credentials from.
+    """
+
+    def __init__(self, user_store: UserStore) -> None:
+        """Initialise with a user store backend.
+
+        :param user_store: Backend implementing :class:`UserStore`.
+        """
+        self._store = user_store
+
+    async def scram_credentials(self, username: str) -> ScramCredentials | None:
+        """Return SCRAM credentials for a user, or ``None`` if unknown/disabled.
+
+        :param username: The username to look up.
+        :returns: :class:`ScramCredentials` or ``None``.
+        """
+        user = await self._store.get_user(username)
+        if user is None or not user.enabled:
+            return None
+        return user.credentials

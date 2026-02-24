@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from hs_py.filter.ast import Node
     from hs_py.kinds import Ref
     from hs_py.tls import TLSConfig
+    from hs_py.user import User
 
 __all__ = [
     "TimescaleAdapter",
@@ -78,6 +79,18 @@ CREATE TABLE IF NOT EXISTS hs_watch_entities (
     entity_id TEXT NOT NULL,
     dirty BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (watch_id, entity_id)
+);
+
+CREATE TABLE IF NOT EXISTS hs_users (
+    username TEXT PRIMARY KEY,
+    credentials JSONB NOT NULL,
+    first_name TEXT NOT NULL DEFAULT '',
+    last_name TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'viewer',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 """
 
@@ -813,10 +826,154 @@ class TimescaleAdapter:
         )
         return [_decode_tags(dict(row["tags"])) for row in rows]
 
+    # ---- UserStore implementation --------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Connection factory
-# ---------------------------------------------------------------------------
+    async def get_user(self, username: str) -> User | None:
+        """Return a user by username, or ``None`` if not found."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM hs_users WHERE username = $1", username)
+        if row is None:
+            return None
+        return self._row_to_user(row)
+
+    async def list_users(self) -> list[User]:
+        """Return all users."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM hs_users ORDER BY username")
+        return [self._row_to_user(row) for row in rows]
+
+    async def create_user(self, user: User) -> None:
+        """Persist a new user.
+
+        :raises ValueError: If a user with the same username already exists.
+        """
+        import base64
+
+        creds = {
+            "salt": base64.b64encode(user.credentials.salt).decode(),
+            "iterations": user.credentials.iterations,
+            "stored_key": base64.b64encode(user.credentials.stored_key).decode(),
+            "server_key": base64.b64encode(user.credentials.server_key).decode(),
+        }
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO hs_users
+                        (username, credentials, first_name, last_name, email,
+                         role, enabled, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    """,
+                    user.username,
+                    creds,
+                    user.first_name,
+                    user.last_name,
+                    user.email,
+                    user.role.value,
+                    user.enabled,
+                    user.created_at,
+                    user.updated_at,
+                )
+        except Exception as exc:
+            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+                msg = f"User already exists: {user.username!r}"
+                raise ValueError(msg) from exc
+            raise
+
+    async def update_user(self, username: str, **fields: Any) -> User:
+        """Update fields on an existing user.
+
+        :raises KeyError: If the user does not exist.
+        """
+        import time
+
+        from hs_py.user import User as _User
+        from hs_py.user import derive_scram_credentials as _derive
+
+        existing = await self.get_user(username)
+        if existing is None:
+            msg = f"User not found: {username!r}"
+            raise KeyError(msg)
+
+        updates: dict[str, Any] = {"updated_at": time.time()}
+        if "password" in fields:
+            updates["credentials"] = _derive(fields.pop("password"))
+
+        allowed = {"first_name", "last_name", "email", "role", "enabled", "credentials"}
+        for k, v in fields.items():
+            if k in allowed:
+                updates[k] = v
+
+        from dataclasses import asdict
+
+        merged = {**asdict(existing), **updates}
+        merged["credentials"] = updates.get("credentials", existing.credentials)
+        # asdict() converts Role enum to its value — restore the enum instance
+        if isinstance(merged.get("role"), str):
+            from hs_py.user import Role as _Role
+
+            merged["role"] = _Role(merged["role"])
+        new_user = _User(**merged)
+
+        import base64
+
+        creds_dict = {
+            "salt": base64.b64encode(new_user.credentials.salt).decode(),
+            "iterations": new_user.credentials.iterations,
+            "stored_key": base64.b64encode(new_user.credentials.stored_key).decode(),
+            "server_key": base64.b64encode(new_user.credentials.server_key).decode(),
+        }
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE hs_users SET credentials = $1, first_name = $2, last_name = $3,
+                    email = $4, role = $5, enabled = $6, updated_at = $7
+                WHERE username = $8
+                """,
+                creds_dict,
+                new_user.first_name,
+                new_user.last_name,
+                new_user.email,
+                new_user.role.value,
+                new_user.enabled,
+                new_user.updated_at,
+                username,
+            )
+        return new_user
+
+    async def delete_user(self, username: str) -> bool:
+        """Delete a user by username."""
+        async with self._pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM hs_users WHERE username = $1", username)
+        return str(result) == "DELETE 1"
+
+    @staticmethod
+    def _row_to_user(row: Any) -> User:
+        """Convert a database row to a User object."""
+        import base64
+
+        from hs_py.auth_types import ScramCredentials
+        from hs_py.user import Role as _Role
+        from hs_py.user import User as _User
+
+        creds_data = row["credentials"]
+        credentials = ScramCredentials(
+            salt=base64.b64decode(creds_data["salt"]),
+            iterations=creds_data["iterations"],
+            stored_key=base64.b64decode(creds_data["stored_key"]),
+            server_key=base64.b64decode(creds_data["server_key"]),
+        )
+        return _User(
+            username=row["username"],
+            credentials=credentials,
+            first_name=row["first_name"],
+            last_name=row["last_name"],
+            email=row["email"],
+            role=_Role(row["role"]),
+            enabled=row["enabled"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
 
 async def _init_connection(conn: asyncpg.Connection[Any]) -> None:

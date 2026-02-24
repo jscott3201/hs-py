@@ -1,8 +1,9 @@
-"""StorageAdapter Protocol for Haystack server backends.
+"""StorageAdapter and UserStore Protocols for Haystack server backends.
 
-Defines the async interface that all storage backends must implement.
-Concrete implementations include :class:`~hs_py.storage.memory.InMemoryAdapter`
-and :class:`~hs_py.redis_ops.RedisOps`.
+Defines the async interfaces that all storage backends must implement.
+Concrete implementations include :class:`~hs_py.storage.memory.InMemoryAdapter`,
+:class:`~hs_py.storage.redis.RedisAdapter`, and
+:class:`~hs_py.storage.timescale.TimescaleAdapter`.
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from hs_py.filter.ast import Node
     from hs_py.kinds import Ref
+    from hs_py.user import User
 
-__all__ = ["StorageAdapter"]
+__all__ = ["StorageAdapter", "UserStore"]
 
 
 @runtime_checkable
@@ -174,5 +176,59 @@ class StorageAdapter(Protocol):
 
         Called when the server shuts down.  Must release all resources
         (connections, file handles, etc.).
+        """
+        ...
+
+
+@runtime_checkable
+class UserStore(Protocol):
+    """Protocol for user management backends.
+
+    All methods are async.  Backends that implement both :class:`StorageAdapter`
+    and :class:`UserStore` can be used as a unified storage layer.
+    """
+
+    async def get_user(self, username: str) -> User | None:
+        """Return a user by username, or ``None`` if not found.
+
+        :param username: The unique login identifier.
+        :returns: :class:`~hs_py.user.User` or ``None``.
+        """
+        ...
+
+    async def list_users(self) -> list[User]:
+        """Return all users.
+
+        :returns: List of :class:`~hs_py.user.User` instances.
+        """
+        ...
+
+    async def create_user(self, user: User) -> None:
+        """Persist a new user.
+
+        :param user: User to create.
+        :raises ValueError: If a user with the same username already exists.
+        """
+        ...
+
+    async def update_user(self, username: str, **fields: Any) -> User:
+        """Update fields on an existing user.
+
+        Accepts keyword arguments matching :class:`~hs_py.user.User` field
+        names.  The ``credentials`` field can be set directly, or pass
+        ``password`` (plaintext) to re-derive credentials.
+
+        :param username: Username of the user to update.
+        :param fields: Field names and new values.
+        :returns: The updated :class:`~hs_py.user.User`.
+        :raises KeyError: If the user does not exist.
+        """
+        ...
+
+    async def delete_user(self, username: str) -> bool:
+        """Delete a user by username.
+
+        :param username: Username to delete.
+        :returns: ``True`` if the user was deleted, ``False`` if not found.
         """
         ...

@@ -39,6 +39,7 @@ from hs_py.encoding.json import decode_val, encode_val
 from hs_py.filter import evaluate
 from hs_py.filter.ast import And, Cmp, CmpOp, Has, Missing, Node, Or
 from hs_py.kinds import Number, Ref
+from hs_py.user import User, derive_scram_credentials, user_from_dict, user_to_dict
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -64,6 +65,7 @@ _TAG = "hs:tag:"
 _TS = "hs:ts:"
 _PRI = "hs:pri:"
 _W = "hs:w:"
+_USER = "hs:user:"
 
 # RediSearch index name and schema
 _FT_INDEX = "hs_idx"
@@ -813,3 +815,86 @@ class RedisAdapter:
             _log.warning("Skipped %d rows without 'id' Ref during load", skipped)
         _log.info("Loaded %d entities into Redis", count)
         return count
+
+    # ---- UserStore implementation --------------------------------------------
+
+    def _user_key(self, username: str) -> str:
+        """Return the Redis key for a user."""
+        if not _SAFE_KEY_RE.match(username):
+            msg = f"Invalid username for Redis key: {username!r}"
+            raise ValueError(msg)
+        return f"{_USER}{username}"
+
+    async def get_user(self, username: str) -> User | None:
+        """Return a user by username, or ``None`` if not found."""
+        data = await self._r.json().get(self._user_key(username))
+        if data is None:
+            return None
+        return user_from_dict(data)
+
+    async def list_users(self) -> list[User]:
+        """Return all users."""
+        keys: list[str] = []
+        async for key in self._r.scan_iter(match=f"{_USER}*", count=1000):
+            keys.append(str(key))
+        if not keys:
+            return []
+        users: list[User] = []
+        for key in keys:
+            data = await self._r.json().get(key)
+            if data is not None:
+                users.append(user_from_dict(data))
+        return users
+
+    async def create_user(self, user: User) -> None:
+        """Persist a new user.
+
+        :raises ValueError: If a user with the same username already exists.
+        """
+        key = self._user_key(user.username)
+        existing = await self._r.json().get(key)
+        if existing is not None:
+            msg = f"User already exists: {user.username!r}"
+            raise ValueError(msg)
+        await self._r.json().set(key, "$", user_to_dict(user))
+
+    async def update_user(self, username: str, **fields: Any) -> User:
+        """Update fields on an existing user.
+
+        :raises KeyError: If the user does not exist.
+        """
+        import time
+
+        key = self._user_key(username)
+        data = await self._r.json().get(key)
+        if data is None:
+            msg = f"User not found: {username!r}"
+            raise KeyError(msg)
+
+        existing = user_from_dict(data)
+        updates: dict[str, Any] = {"updated_at": time.time()}
+        if "password" in fields:
+            updates["credentials"] = derive_scram_credentials(fields.pop("password"))
+
+        allowed = {"first_name", "last_name", "email", "role", "enabled", "credentials"}
+        for k, v in fields.items():
+            if k in allowed:
+                updates[k] = v
+
+        from dataclasses import asdict
+
+        merged = {**asdict(existing), **updates}
+        merged["credentials"] = updates.get("credentials", existing.credentials)
+        # asdict() converts Role enum to its value — restore the enum instance
+        if isinstance(merged.get("role"), str):
+            from hs_py.user import Role
+
+            merged["role"] = Role(merged["role"])
+        new_user = User(**merged)
+        await self._r.json().set(key, "$", user_to_dict(new_user))
+        return new_user
+
+    async def delete_user(self, username: str) -> bool:
+        """Delete a user by username."""
+        key = self._user_key(username)
+        return bool(await self._r.delete(key))

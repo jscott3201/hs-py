@@ -3,6 +3,11 @@
 WebSocket Transport
 ===================
 
+.. warning::
+
+   The WebSocket transport API is **experimental** and subject to breaking
+   changes in future releases.
+
 haystack-py includes a full WebSocket transport layer for persistent, bidirectional
 communication.  The WebSocket client mirrors the HTTP
 :class:`~hs_py.client.Client` API, with added support for server-push

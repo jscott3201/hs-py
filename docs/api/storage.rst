@@ -7,7 +7,8 @@ Protocol
 --------
 
 The :class:`~hs_py.storage.protocol.StorageAdapter` runtime-checkable
-protocol that all backends implement.
+protocol that all backends implement for entity and history storage, and the
+:class:`~hs_py.storage.protocol.UserStore` protocol for user management.
 
 .. automodule:: hs_py.storage.protocol
    :members:

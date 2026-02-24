@@ -9,7 +9,8 @@ routing, content negotiation, authentication, and error wrapping.
 .. seealso::
 
    :doc:`../api/security` for the server and auth API reference,
-   :doc:`storage-guide` for storage backend configuration.
+   :doc:`storage-guide` for storage backend configuration,
+   :doc:`auth-users-permissions` for user management and role-based access.
 
 .. _guide-server-quickstart:
 
@@ -20,17 +21,39 @@ Quick Start
 
    import uvicorn
    from hs_py.fastapi_server import create_fastapi_app
-   from hs_py.auth_types import SimpleAuthenticator
-   from hs_py.storage.memory import MemoryAdapter
+   from hs_py.auth_types import StorageAuthenticator
+   from hs_py.storage.memory import InMemoryAdapter
+   from hs_py.user import Role, create_user
 
-   storage = MemoryAdapter()
-   auth = SimpleAuthenticator({"admin": "secret"})
-   app = create_fastapi_app(storage=storage, authenticator=auth)
+   storage = InMemoryAdapter()
+
+   # Create users — StorageAuthenticator reads credentials from the store
+   import asyncio
+   asyncio.run(storage.create_user(
+       create_user("admin", "s3cret", role=Role.ADMIN)
+   ))
+
+   auth = StorageAuthenticator(storage)
+   app = create_fastapi_app(
+       storage=storage,
+       authenticator=auth,
+       user_store=storage,
+   )
 
    uvicorn.run(app, host="0.0.0.0", port=8080)
 
-This starts a FastAPI server on port 8080 with SCRAM-SHA-256 authentication
-and routes for all standard Haystack ops.
+This starts a FastAPI server on port 8080 with SCRAM-SHA-256 authentication,
+role-based access control, and routes for all standard Haystack ops.
+
+For a simpler setup without user management, use
+:class:`~hs_py.auth_types.SimpleAuthenticator`:
+
+.. code-block:: python
+
+   from hs_py.auth_types import SimpleAuthenticator
+
+   auth = SimpleAuthenticator({"admin": "secret"})
+   app = create_fastapi_app(storage=storage, authenticator=auth)
 
 .. _guide-server-ops:
 
@@ -178,6 +201,27 @@ backends (LDAP, database, OAuth):
            # Look up credentials from your backend
            ...
 
+Storage-Backed Authentication
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:class:`~hs_py.auth_types.StorageAuthenticator` reads SCRAM credentials
+directly from a :class:`~hs_py.storage.protocol.UserStore`, so user creation
+and authentication share a single backend:
+
+.. code-block:: python
+
+   from hs_py.auth_types import StorageAuthenticator
+   from hs_py.storage.memory import InMemoryAdapter
+
+   storage = InMemoryAdapter()
+   auth = StorageAuthenticator(storage)
+   app = create_fastapi_app(
+       storage=storage, authenticator=auth, user_store=storage
+   )
+
+Pass ``user_store`` to enable the user management REST API and role enforcement.
+See :doc:`auth-users-permissions` for the full details.
+
 .. _guide-server-app:
 
 Application Setup
@@ -283,6 +327,11 @@ delivery mechanism (HTTP or WebSocket).
 
 WebSocket Endpoint
 ------------------
+
+.. warning::
+
+   The WebSocket transport API is **experimental** and subject to breaking
+   changes in future releases.
 
 The FastAPI app includes a WebSocket endpoint at ``{prefix}/ws`` that supports
 token-based authentication. Clients authenticate via HTTP SCRAM first, then

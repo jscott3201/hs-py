@@ -41,6 +41,7 @@ with storage backends, see :doc:`guide/server-guide` and
    guide/data-types
    guide/client-guide
    guide/server-guide
+   guide/auth-users-permissions
    guide/storage-guide
    guide/encoding-guide
    guide/filter-guide

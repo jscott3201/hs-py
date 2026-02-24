@@ -1,12 +1,13 @@
 """hs-py — Async Project Haystack client library for Python."""
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 from hs_py.auth_types import (
     Authenticator,
     CertAuthenticator,
     ScramCredentials,
     SimpleAuthenticator,
+    StorageAuthenticator,
 )
 from hs_py.client import Client
 from hs_py.convert import grid_to_pythonic
@@ -90,6 +91,26 @@ def __getattr__(name: str) -> object:
         from hs_py.storage.timescale import create_timescale_pool
 
         return create_timescale_pool
+    if name == "UserStore":
+        from hs_py.storage.protocol import UserStore
+
+        return UserStore
+    if name == "User":
+        from hs_py.user import User
+
+        return User
+    if name == "create_user":
+        from hs_py.user import create_user
+
+        return create_user
+    if name == "ensure_superuser":
+        from hs_py.bootstrap import ensure_superuser
+
+        return ensure_superuser
+    if name == "Role":
+        from hs_py.user import Role
+
+        return Role
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
 
@@ -125,13 +146,17 @@ __all__ = [
     "RedisOps",
     "Ref",
     "Remove",
+    "Role",
     "ScramCredentials",
     "SimpleAuthenticator",
     "StorageAdapter",
+    "StorageAuthenticator",
     "Symbol",
     "TLSConfig",
     "TimescaleAdapter",
     "Uri",
+    "User",
+    "UserStore",
     "WatchAccumulator",
     "WatchState",
     "WebSocketClient",
@@ -144,10 +169,12 @@ __all__ = [
     "create_fastapi_app",
     "create_redis_client",
     "create_timescale_pool",
+    "create_user",
     "decode_binary_frame",
     "encode_binary_push",
     "encode_binary_request",
     "encode_binary_response",
+    "ensure_superuser",
     "evaluate",
     "evaluate_grid",
     "export_jsonld",

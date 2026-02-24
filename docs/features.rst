@@ -12,8 +12,9 @@ Two transport layers are supported, both fully asynchronous:
 
 - **HTTP** — ``aiohttp`` based with persistent connections, connection pooling,
   timeout configuration, and content-negotiated responses.
-- **WebSocket** — ``websockets`` sans-I/O protocol with per-message deflate
-  compression, batch request pipelining, and watch push delivery.
+- **WebSocket** *(experimental)* — ``websockets`` sans-I/O protocol with
+  per-message deflate compression, batch request pipelining, and watch push
+  delivery.  The WebSocket API is subject to breaking changes in future releases.
 
 Wire Formats
 ------------
@@ -79,7 +80,9 @@ Storage Backends
 ----------------
 
 A :class:`~hs_py.storage.protocol.StorageAdapter` protocol decouples ops from
-data storage. Three implementations ship with the library:
+data storage.  A companion :class:`~hs_py.storage.protocol.UserStore` protocol
+handles user persistence.  Three implementations ship with the library, each
+implementing both protocols:
 
 - **Memory** — :class:`~hs_py.storage.memory.MemoryAdapter` for testing and
   prototyping
@@ -98,10 +101,31 @@ Authentication
 - **Token-based** — Bearer token authentication for WebSocket connections.
 - **mTLS** — :class:`~hs_py.auth_types.CertAuthenticator` validates client
   certificates for mutual TLS authentication.
+- **Storage-backed** — :class:`~hs_py.auth_types.StorageAuthenticator` reads
+  SCRAM credentials from any :class:`~hs_py.storage.protocol.UserStore`
+  backend.  Disabled users are automatically denied.
 - **Certificate generation** — :func:`~hs_py.tls.generate_test_certs` creates
   a CA, server, and client certificate chain for development.
 
-See :doc:`guide/tls-guide`.
+See :doc:`guide/auth-users-permissions` and :doc:`guide/tls-guide`.
+
+User Management & Permissions
+-----------------------------
+
+- :class:`~hs_py.user.User` — Frozen user model with SCRAM credentials
+  (passwords never stored in plaintext).
+- :class:`~hs_py.user.Role` — ``ADMIN``, ``OPERATOR``, ``VIEWER`` enum with
+  strict ordering for permission checks.
+- :class:`~hs_py.storage.protocol.UserStore` — Protocol for user CRUD
+  (get, list, create, update, delete) implemented by all three storage backends.
+- REST API — Admin-only CRUD endpoints at ``/api/users/`` for creating,
+  listing, updating, and deleting users.
+- Role enforcement on all Haystack ops: write ops require Operator+,
+  user management requires Admin.  Enforced on both HTTP and WebSocket.
+- Admin bootstrap: seeds an admin user from environment variables
+  (``HS_SUPERUSER_USERNAME`` / ``HS_SUPERUSER_PASSWORD``) on first startup.
+
+See :doc:`guide/auth-users-permissions`.
 
 TLS
 ---

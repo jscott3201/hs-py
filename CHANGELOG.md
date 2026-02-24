@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-02-24
+
+### Added
+
+- `Role` enum (`ADMIN`, `OPERATOR`, `VIEWER`) for role-based access control.
+- Permission helpers: `can_admin()`, `can_write()`, `can_read()` and op classification sets `WRITE_OPS`/`READ_OPS`.
+- Role enforcement on Haystack POST ops — write ops (hisWrite, pointWrite, invokeAction, watches) require Operator or Admin role.
+- Role enforcement on WebSocket ops — same permission model as HTTP.
+- User management endpoints now validate `role` field (string) on create/update.
+
+### Changed
+
+- **Breaking:** Replaced `is_superuser: bool` on `User` with `role: Role` enum field.
+- `create_user()` accepts `role=Role.VIEWER` (default) instead of `is_superuser=False`.
+- User API responses return `"role": "admin"|"operator"|"viewer"` instead of `"is_superuser": bool`.
+- `ensure_superuser()` bootstrap now checks for `role == Role.ADMIN` instead of `is_superuser`.
+- TimescaleDB `hs_users` table schema: `is_superuser BOOLEAN` column replaced with `role TEXT`.
+- All three storage backends (InMemory, Redis, TimescaleDB) updated for `role` field.
+
 ## [0.1.6] - 2026-02-24
 
 ### Optimized
