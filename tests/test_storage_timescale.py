@@ -1436,10 +1436,11 @@ class TestPgLiteral:
 
         assert _pg_literal("dis") == "'dis'"
 
-    def test_single_quote_escaped(self) -> None:
+    def test_invalid_tag_name_rejected(self) -> None:
         from hs_py.storage.timescale import _pg_literal
 
-        assert _pg_literal("it's") == "'it''s'"
+        with pytest.raises(ValueError, match="Invalid tag name"):
+            _pg_literal("it's")
 
 
 class TestEncodeTags:

@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import logging
+import re
 import secrets
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +68,12 @@ _W = "hs:w:"
 # RediSearch index name and schema
 _FT_INDEX = "hs_idx"
 
+# Maximum results from a single RediSearch query.
+_MAX_FT_RESULTS = 10_000
+
+# Allowed pattern for Redis key components (Haystack identifiers).
+_SAFE_KEY_RE = re.compile(r"^[a-zA-Z0-9_:\-.~]+$")
+
 # Ref-valued fields indexed as TAG in RediSearch for efficient querying.
 _FT_REF_FIELDS = frozenset({"siteRef", "equipRef"})
 
@@ -74,7 +81,15 @@ _FT_REF_FIELDS = frozenset({"siteRef", "equipRef"})
 _FT_EXPECTED_FIELDS = frozenset({"_tags", "siteRef", "equipRef"})
 
 
+def _validate_key_part(value: str, label: str = "key") -> None:
+    """Validate that a value is safe for use in a Redis key."""
+    if not _SAFE_KEY_RE.match(value):
+        msg = f"Invalid characters in {label}: {value!r}"
+        raise ValueError(msg)
+
+
 def _entity_key(ref_val: str) -> str:
+    _validate_key_part(ref_val, "ref_val")
     return f"{_E}{ref_val}"
 
 
@@ -391,7 +406,7 @@ class RedisAdapter:
         """
         from redis.commands.search.query import Query
 
-        max_results = limit if limit is not None else 10000
+        max_results = min(limit, _MAX_FT_RESULTS) if limit is not None else _MAX_FT_RESULTS
         q = Query(query_str).paging(0, max_results)  # type: ignore[no-untyped-call]
         result: Any = await self._r.ft(_FT_INDEX).search(q)  # type: ignore[misc]
 
@@ -732,13 +747,17 @@ class RedisAdapter:
             ref_vals: list[str] = [str(v) for v in await self._r.smembers(ids_key)]
             await self._r.delete(dirty_key)
         else:
-            # Return only dirty entities
-            ref_vals = [str(v) for v in await self._r.smembers(dirty_key)]
+            # Atomically read and clear dirty set to avoid TOCTOU race
+            pipe = self._r.pipeline()
+            pipe.smembers(dirty_key)
+            pipe.delete(dirty_key)
+            results = await pipe.execute()
+            dirty_members = results[0]
+            ref_vals = [str(v) for v in dirty_members]
             # Only include IDs that are still watched
             if ref_vals:
                 watched = await self._r.smembers(ids_key)
                 ref_vals = [rv for rv in ref_vals if rv in watched]
-            await self._r.delete(dirty_key)
 
         if not ref_vals:
             return []

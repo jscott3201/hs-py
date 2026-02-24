@@ -1,12 +1,34 @@
 [project]
 name = "haystack-py"
-version = "0.1.4"
+version = "0.1.5"
 description = "Async Project Haystack client and ontology library for Python"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
+authors = [{ name = "Justin Scott", email = "justin@jscott.me" }]
+keywords = ["haystack", "iot", "building-automation", "smart-buildings", "bacnet", "scada", "hvac"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = ["aiohttp>=3.10", "orjson>=3.10", "cryptography>=42.0", "websockets>=14.0", "rdflib>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/jscott3201/hs-py"
+Documentation = "https://jscott3201.github.io/hs-py/"
+Repository = "https://github.com/jscott3201/hs-py"
+Changelog = "https://github.com/jscott3201/hs-py/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jscott3201/hs-py/issues"
 
 [project.optional-dependencies]
 server = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "redis[hiredis]>=5.2"]

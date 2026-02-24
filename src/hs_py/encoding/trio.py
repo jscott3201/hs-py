@@ -28,7 +28,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def parse_trio(text: str) -> list[dict[str, Any]]:
+_MAX_TRIO_DEPTH = 32
+
+
+def parse_trio(text: str, *, _depth: int = 0) -> list[dict[str, Any]]:
     """Parse Trio text into a list of tag dicts.
 
     Each dict represents one record (separated by lines of ``---``).
@@ -37,7 +40,11 @@ def parse_trio(text: str) -> list[dict[str, Any]]:
 
     :param text: Trio-formatted text.
     :returns: List of tag dicts, one per record.
+    :raises ValueError: If nesting depth exceeds limit.
     """
+    if _depth > _MAX_TRIO_DEPTH:
+        msg = "Maximum Trio nesting depth exceeded"
+        raise ValueError(msg)
     records: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
     ml_tag: str | None = None
@@ -61,7 +68,7 @@ def parse_trio(text: str) -> list[dict[str, Any]]:
                 continue
             # Non-indented, non-blank line ends multi-line mode.
             # Fall through to separator / tag-line handling below.
-            _flush_multiline(current, ml_tag, ml_lines, ml_mode)
+            _flush_multiline(current, ml_tag, ml_lines, ml_mode, _depth=_depth)
             ml_tag = None
             ml_lines = []
             ml_mode = "string"
@@ -96,7 +103,7 @@ def parse_trio(text: str) -> list[dict[str, Any]]:
             current[name] = _parse_trio_val(val_str)
 
     # Finalize last record
-    _flush_multiline(current, ml_tag, ml_lines, ml_mode)
+    _flush_multiline(current, ml_tag, ml_lines, ml_mode, _depth=_depth)
     if current:
         records.append(current)
 
@@ -265,6 +272,8 @@ def _flush_multiline(
     tag: str | None,
     lines: list[str],
     mode: str,
+    *,
+    _depth: int = 0,
 ) -> None:
     """Finalize a multi-line value and add it to the current record."""
     if tag is None:
@@ -275,7 +284,7 @@ def _flush_multiline(
 
         current[tag] = decode_grid(text)
     elif mode == "trio":
-        current[tag] = parse_trio(text)
+        current[tag] = parse_trio(text, _depth=_depth + 1)
     else:
         current[tag] = text
 

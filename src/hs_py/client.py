@@ -43,6 +43,9 @@ class Client:
             raw_grid = await c.about(raw=True)  # returns Grid
     """
 
+    def __repr__(self) -> str:
+        return f"Client(base_url={self._base_url!r}, username={self._username!r})"
+
     def __init__(
         self,
         base_url: str,
@@ -519,6 +522,8 @@ class Client:
             self._auth_token = await authenticate(
                 session, self._base_url, self._username, self._password
             )
+            # Clear password from memory after successful authentication
+            self._password = ""
             _log.debug("Authentication successful for '%s'", self._username)
         else:
             self._auth_token = ""
@@ -536,6 +541,7 @@ class Client:
         session = self._require_session()
         url = f"{self._base_url}/{op}"
         kwargs["headers"] = self._auth_headers()
+        kwargs.setdefault("allow_redirects", False)
         _log.debug("%s %s", method, url)
         try:
             async with session.request(method, url, **kwargs) as resp:

@@ -46,6 +46,10 @@ class ParseError(ValueError):
     """Raised when a filter string cannot be parsed."""
 
 
+# Maximum filter string length accepted for parsing (10 KB).
+_MAX_FILTER_LENGTH = 10_240
+
+
 @functools.lru_cache(maxsize=256)
 def parse(text: str) -> Node:
     """Parse a Haystack filter string into an AST.
@@ -54,8 +58,11 @@ def parse(text: str) -> Node:
 
     :param text: Filter expression string.
     :returns: Root AST node.
-    :raises ParseError: If the filter string is invalid.
+    :raises ParseError: If the filter string is invalid or too long.
     """
+    if len(text) > _MAX_FILTER_LENGTH:
+        msg = f"Filter string exceeds maximum length ({len(text)} > {_MAX_FILTER_LENGTH})"
+        raise ParseError(msg)
     return _Parser(text).parse()
 
 

@@ -53,6 +53,12 @@ __all__ = [
 # Constants
 # ---------------------------------------------------------------------------
 
+#: Maximum nesting depth for recursive value scanning (lists, dicts, grids).
+MAX_SCAN_DEPTH = 64
+
+#: Maximum string/URI length in scanned values (1 MB).
+MAX_STRING_LENGTH = 1_048_576
+
 #: Regex for Zinc datetime values.
 DATETIME_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
@@ -274,14 +280,18 @@ def format_ref(ref: Ref, *, zinc: bool = False) -> str:
 _TRIO_UNIT_STOP = frozenset(" \t\n\r,]}>)")
 
 
-def scan_val(text: str, pos: int) -> tuple[Any, int]:
+def scan_val(text: str, pos: int, *, _depth: int = 0) -> tuple[Any, int]:
     """Scan a Zinc value starting at *pos*.
 
     :param text: Source text.
     :param pos: Starting position.
     :returns: ``(value, end_pos)`` tuple.
-    :raises ValueError: If an unexpected character is encountered.
+    :raises ValueError: If an unexpected character is encountered or nesting
+        depth exceeds :data:`MAX_SCAN_DEPTH`.
     """
+    if _depth > MAX_SCAN_DEPTH:
+        msg = "Maximum value nesting depth exceeded"
+        raise ValueError(msg)
     pos = skip_ws(text, pos)
     if pos >= len(text):
         return None, pos
@@ -297,11 +307,11 @@ def scan_val(text: str, pos: int) -> tuple[Any, int]:
     if ch == "`":
         return scan_uri(text, pos)
     if ch == "[":
-        return scan_list(text, pos)
+        return scan_list(text, pos, _depth=_depth + 1)
     if ch == "{":
-        return scan_dict(text, pos)
+        return scan_dict(text, pos, _depth=_depth + 1)
     if ch == "<" and pos + 1 < len(text) and text[pos + 1] == "<":
-        return _scan_nested_grid(text, pos)
+        return _scan_nested_grid(text, pos, _depth=_depth + 1)
     if ch == "-":
         rest = text[pos:]
         if rest.startswith("-INF") and (len(rest) == 4 or not rest[4].isalnum()):
@@ -327,6 +337,7 @@ def scan_str(text: str, pos: int) -> tuple[str, int]:
     """
     pos += 1  # skip opening "
     chars: list[str] = []
+    length = 0
     while pos < len(text):
         ch = text[pos]
         if ch == "\\":
@@ -346,6 +357,10 @@ def scan_str(text: str, pos: int) -> tuple[str, int]:
         else:
             chars.append(ch)
             pos += 1
+        length += 1
+        if length > MAX_STRING_LENGTH:
+            msg = f"String exceeds maximum length of {MAX_STRING_LENGTH}"
+            raise ValueError(msg)
     raise ValueError("Unterminated string")
 
 
@@ -394,6 +409,7 @@ def scan_uri(text: str, pos: int) -> tuple[Uri, int]:
     """
     pos += 1  # skip `
     chars: list[str] = []
+    length = 0
     while pos < len(text):
         ch = text[pos]
         if ch == "\\" and pos + 1 < len(text):
@@ -404,10 +420,14 @@ def scan_uri(text: str, pos: int) -> tuple[Uri, int]:
         else:
             chars.append(ch)
             pos += 1
+        length += 1
+        if length > MAX_STRING_LENGTH:
+            msg = f"URI exceeds maximum length of {MAX_STRING_LENGTH}"
+            raise ValueError(msg)
     raise ValueError("Unterminated URI")
 
 
-def scan_list(text: str, pos: int) -> tuple[list[Any], int]:
+def scan_list(text: str, pos: int, *, _depth: int = 0) -> tuple[list[Any], int]:
     """Scan a Zinc list literal starting at ``[``.
 
     :param text: Source text.
@@ -418,7 +438,7 @@ def scan_list(text: str, pos: int) -> tuple[list[Any], int]:
     items: list[Any] = []
     pos = skip_ws(text, pos)
     while pos < len(text) and text[pos] != "]":
-        val, pos = scan_val(text, pos)
+        val, pos = scan_val(text, pos, _depth=_depth)
         items.append(val)
         pos = skip_ws(text, pos)
         if pos < len(text) and text[pos] == ",":
@@ -429,7 +449,7 @@ def scan_list(text: str, pos: int) -> tuple[list[Any], int]:
     return items, pos
 
 
-def scan_dict(text: str, pos: int) -> tuple[dict[str, Any], int]:
+def scan_dict(text: str, pos: int, *, _depth: int = 0) -> tuple[dict[str, Any], int]:
     """Scan a Zinc dict literal starting at ``{``.
 
     :param text: Source text.
@@ -448,7 +468,7 @@ def scan_dict(text: str, pos: int) -> tuple[dict[str, Any], int]:
         # Check for colon → value follows
         if pos < len(text) and text[pos] == ":":
             pos += 1
-            val, pos = scan_val(text, pos)
+            val, pos = scan_val(text, pos, _depth=_depth)
             result[name] = val
         else:
             result[name] = MARKER
@@ -614,8 +634,11 @@ def _scan_coord_body(text: str, pos: int) -> tuple[Coord, int]:
     return Coord(lat, lng), pos
 
 
-def _scan_nested_grid(text: str, pos: int) -> tuple[Any, int]:
+def _scan_nested_grid(text: str, pos: int, *, _depth: int = 0) -> tuple[Any, int]:
     """Scan a nested grid literal between ``<<`` and ``>>``."""
+    if _depth > MAX_SCAN_DEPTH:
+        msg = "Maximum nested grid depth exceeded"
+        raise ValueError(msg)
     pos += 2  # skip <<
     depth = 1
     start = pos

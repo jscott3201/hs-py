@@ -57,6 +57,10 @@ class JsonVersion(Enum):
 # Maximum recursion depth for JSON decoding to prevent stack overflow.
 _MAX_DECODE_DEPTH = 64
 
+# Maximum number of rows/columns in a decoded grid to prevent memory exhaustion.
+_MAX_GRID_ROWS = 100_000
+_MAX_GRID_COLS = 10_000
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -366,6 +370,9 @@ def _decode_grid_v4(obj: dict[str, Any], _depth: int = 0) -> Grid:
     meta_raw = obj.get("meta", {})
     meta = {k: _decode_val_v4(v, _depth + 1) for k, v in meta_raw.items()}
     cols_raw = obj.get("cols", [])
+    if len(cols_raw) > _MAX_GRID_COLS:
+        msg = f"Grid exceeds maximum column count ({len(cols_raw)} > {_MAX_GRID_COLS})"
+        raise ValueError(msg)
     cols = tuple(
         Col(
             name=c["name"],
@@ -374,6 +381,9 @@ def _decode_grid_v4(obj: dict[str, Any], _depth: int = 0) -> Grid:
         for c in cols_raw
     )
     rows_raw = obj.get("rows", [])
+    if len(rows_raw) > _MAX_GRID_ROWS:
+        msg = f"Grid exceeds maximum row count ({len(rows_raw)} > {_MAX_GRID_ROWS})"
+        raise ValueError(msg)
     rows = tuple({k: _decode_val_v4(v, _depth + 1) for k, v in row.items()} for row in rows_raw)
     return Grid(meta=meta, cols=cols, rows=rows)
 
@@ -589,7 +599,10 @@ def _v3_coord(rest: str) -> Coord:
 
 def _v3_xstr(rest: str) -> XStr:
     """Parse ``"Type:value"``."""
-    idx = rest.index(":")
+    idx = rest.find(":")
+    if idx < 0:
+        msg = f"Invalid XStr format (missing ':' separator): {rest!r}"
+        raise ValueError(msg)
     return XStr(rest[:idx], rest[idx + 1 :])
 
 
@@ -615,6 +628,9 @@ def _decode_grid_v3(obj: dict[str, Any], _depth: int = 0) -> Grid:
     meta_raw = obj.get("meta", {})
     meta = {k: _decode_val_v3(v, _depth + 1) for k, v in meta_raw.items()}
     cols_raw = obj.get("cols", [])
+    if len(cols_raw) > _MAX_GRID_COLS:
+        msg = f"Grid exceeds maximum column count ({len(cols_raw)} > {_MAX_GRID_COLS})"
+        raise ValueError(msg)
     cols = tuple(
         Col(
             name=c["name"],
@@ -623,6 +639,9 @@ def _decode_grid_v3(obj: dict[str, Any], _depth: int = 0) -> Grid:
         for c in cols_raw
     )
     rows_raw = obj.get("rows", [])
+    if len(rows_raw) > _MAX_GRID_ROWS:
+        msg = f"Grid exceeds maximum row count ({len(rows_raw)} > {_MAX_GRID_ROWS})"
+        raise ValueError(msg)
     rows = tuple({k: _decode_val_v3(v, _depth + 1) for k, v in row.items()} for row in rows_raw)
     return Grid(meta=meta, cols=cols, rows=rows)
 

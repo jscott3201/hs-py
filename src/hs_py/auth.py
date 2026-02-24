@@ -34,6 +34,12 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
+# Maximum PBKDF2 iterations to accept from a server (prevents CPU DoS).
+_MAX_SCRAM_ITERATIONS = 100_000
+
+# Minimum salt length in bytes per NIST SP 800-132 (128 bits).
+_MIN_SALT_BYTES = 16
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -132,7 +138,9 @@ def scram_client_first(username: str) -> ScramClientFirst:
     :returns: :class:`ScramClientFirst` with the message and nonce.
     """
     c_nonce = base64.urlsafe_b64encode(os.urandom(24)).decode().rstrip("=")
-    client_first_bare = f"n={username},r={c_nonce}"
+    # Escape per RFC 5802 §5.1: '=' → '=3D', ',' → '=2C'
+    safe_user = username.replace("=", "=3D").replace(",", "=2C")
+    client_first_bare = f"n={safe_user},r={c_nonce}"
     client_first_msg = "n,," + client_first_bare
     return ScramClientFirst(
         client_first_msg=client_first_msg,
@@ -164,7 +172,12 @@ def scram_client_final(
     if not s_nonce.startswith(first.c_nonce):
         raise AuthError("Server nonce does not start with client nonce")
 
+    if iterations > _MAX_SCRAM_ITERATIONS:
+        raise AuthError(f"Server requested excessive PBKDF2 iterations: {iterations}")
+
     salt = base64.b64decode(salt_b64)
+    if len(salt) < _MIN_SALT_BYTES:
+        raise AuthError(f"Server provided insufficient salt length: {len(salt)} bytes")
     algo = _hash_algo(hash_name)
     salted_password = _derive_key(password.encode(), salt, iterations, algo)
     client_key = _hmac(algo, salted_password, b"Client Key")
@@ -198,7 +211,7 @@ def verify_server_signature(
     sf_params = _parse_scram_msg(server_final_msg)
     server_sig_b64 = sf_params.get("v", "")
     if not server_sig_b64:
-        return
+        raise AuthError("Server signature missing — server authentication failed")
     server_sig = base64.b64decode(server_sig_b64)
     server_key = _hmac("sha256", final.salted_password, b"Server Key")
     expected = _hmac("sha256", server_key, final.auth_message.encode())

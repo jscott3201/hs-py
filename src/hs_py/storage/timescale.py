@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -218,9 +219,20 @@ def _pg_literal(name: str) -> str:
     """Return a PostgreSQL string literal for a column/key name.
 
     Uses single-quoting with embedded single quotes doubled.
+    Validates that the name matches Haystack tag name rules.
+
+    :raises ValueError: If *name* contains disallowed characters.
     """
+    if not _TAG_NAME_RE.match(name):
+        msg = f"Invalid tag name for SQL: {name!r}"
+        raise ValueError(msg)
     escaped = name.replace("'", "''")
     return f"'{escaped}'"
+
+
+# Strict Haystack tag name pattern: starts with lowercase letter,
+# then alphanumeric or underscore.
+_TAG_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 
 
 # ---------------------------------------------------------------------------

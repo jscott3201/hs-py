@@ -609,11 +609,11 @@ class TestVerifyServerSignature:
         server_sig = _hmac("sha256", server_key, final.auth_message.encode())
         return final, server_sig
 
-    def test_missing_v_returns_silently(self) -> None:
-        """Cover auth.py L201: no v= in server-final message."""
+    def test_missing_v_raises_error(self) -> None:
+        """Missing v= in server-final message should raise AuthError."""
         final, _ = self._make_final()
-        # No "v=" key — should return without error
-        verify_server_signature(final, "something=else")
+        with pytest.raises(AuthError, match="Server signature missing"):
+            verify_server_signature(final, "something=else")
 
     def test_bad_server_signature_raises(self) -> None:
         """Cover auth.py L206: server signature verification failed."""

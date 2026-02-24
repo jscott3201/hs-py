@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-02-24
+
+### Security
+
+- Capped PBKDF2 iteration count at 100,000 to prevent CPU exhaustion DoS.
+- SCRAM username now escaped per RFC 5802 (`=` → `=3D`, `,` → `=2C`).
+- Missing server signature in SCRAM now raises `AuthError` (prevents MitM).
+- Enforced minimum 16-byte salt length in SCRAM per NIST SP 800-132.
+- Validated tag names against strict regex before SQL interpolation in TimescaleDB adapter.
+- Validated Redis key components against Haystack identifier character set.
+- HTTP client disables redirect following to prevent SSRF.
+- Client password cleared from memory after successful authentication.
+- Client `__repr__` no longer exposes password.
+
+### Added
+
+- Recursion depth limits (64) on Zinc scanner (`scan_val`, `scan_list`, `scan_dict`, nested grids).
+- Recursion depth limit (32) on Trio parser for nested records.
+- Grid decode limits: max 100,000 rows, 10,000 columns in JSON decoder.
+- String and URI length cap (1 MB) in Zinc scanner.
+- Filter parser rejects expressions exceeding 10 KB before LRU caching.
+- `Ref.val` format validation against Haystack identifier characters.
+- Atomic pipeline for Redis watch dirty-set read-and-clear (fixes TOCTOU race).
+- RediSearch query result cap at 10,000.
+- Full project metadata in `pyproject.toml` (authors, keywords, classifiers, URLs).
+
 ## [0.1.4] - 2026-02-24
 
 ### Added

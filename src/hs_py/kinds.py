@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -151,6 +152,10 @@ class Number:
         return hash((v, self.unit))
 
 
+# Haystack Ref identifier: ASCII letters, digits, underbar, colon, dash, dot, tilde.
+_REF_VAL_RE = re.compile(r"^[a-zA-Z0-9_:\-.~]+$")
+
+
 @dataclass(frozen=True, slots=True)
 class Ref:
     """Entity reference identifier.
@@ -168,6 +173,8 @@ class Ref:
     def __post_init__(self) -> None:
         if not self.val:
             raise ValueError("Ref val must not be empty")
+        if not _REF_VAL_RE.match(self.val):
+            raise ValueError(f"Ref val contains invalid characters: {self.val!r}")
 
     def __str__(self) -> str:
         if self.dis is not None:
