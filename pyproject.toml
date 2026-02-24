@@ -1,6 +1,6 @@
 [project]
 name = "hs-py"
-version = "0.1.1"
+version = "0.1.2"
 description = "Async Project Haystack client and ontology library for Python"
 readme = "README.md"
 license = "MIT"

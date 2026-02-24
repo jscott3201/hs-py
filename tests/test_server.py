@@ -2,12 +2,19 @@ import base64
 import hashlib
 import hmac
 import os
+import time
 from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from hs_py._scram_core import MAX_HANDSHAKES, HandshakeState, TokenEntry
+from hs_py._scram_core import (
+    HANDSHAKE_TIMEOUT,
+    MAX_HANDSHAKES,
+    TOKEN_LIFETIME,
+    HandshakeState,
+    TokenEntry,
+)
 from hs_py.auth import _b64url_decode, _b64url_encode, _parse_header_params
 from hs_py.auth_types import SimpleAuthenticator
 from hs_py.encoding.json import decode_grid, encode_grid
@@ -884,7 +891,7 @@ class TestHandshakeLimits:
             iterations=1,
             stored_key=b"x",
             server_key=b"x",
-            created=0.0,  # long ago
+            created=time.monotonic() - HANDSHAKE_TIMEOUT - 10,  # guaranteed expired
         )
         assert "stale" in handshakes
 
@@ -913,7 +920,9 @@ class TestTokenExpiry:
         tokens = mw._tokens
 
         # Add an expired token (created far in the past)
-        tokens["expired-token"] = TokenEntry(username="admin", created=0.0)
+        tokens["expired-token"] = TokenEntry(
+            username="admin", created=time.monotonic() - TOKEN_LIFETIME - 10
+        )
 
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get(

@@ -1,6 +1,6 @@
 """hs-py — Async Project Haystack client library for Python."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from hs_py.auth_types import (
     Authenticator,
